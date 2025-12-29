@@ -56,8 +56,31 @@ export const ConnectorsPage: React.FC = () => {
           >
             <div className="px-6 py-4 border-b border-slate-100 flex justify-between items-center bg-slate-50/30">
               <div className="flex items-center gap-3">
-                <div className="w-8 h-8 rounded bg-indigo-50 text-indigo-600 flex items-center justify-center">
-                  <Cable size={18} />
+                <div className="w-8 h-8 rounded bg-white border border-slate-100 flex items-center justify-center overflow-hidden p-1.5 shadow-sm">
+                  {connector.connector_type === "nats" && (
+                    <img
+                      src="/logos/nats.svg"
+                      className="w-full h-full object-contain"
+                      alt="NATS"
+                    />
+                  )}
+                  {connector.connector_type === "kafka" && (
+                    <img
+                      src="/logos/kafka.svg"
+                      className="w-full h-full object-contain"
+                      alt="Kafka"
+                    />
+                  )}
+                  {connector.connector_type === "postgres_cdc" && (
+                    <img
+                      src="/logos/postgresql.svg"
+                      className="w-full h-full object-contain"
+                      alt="Postgres"
+                    />
+                  )}
+                  {!["nats", "kafka", "postgres_cdc"].includes(
+                    connector.connector_type.toString()
+                  ) && <Cable size={18} className="text-indigo-600" />}
                 </div>
                 <div>
                   <h3 className="text-sm font-bold text-slate-900">
@@ -136,23 +159,66 @@ const ConnectorForm: React.FC<{
   onClose: () => void;
 }> = ({ connector, onClose }) => {
   const { createMutation, updateMutation } = useConnectorMutations();
+
   const [formData, setFormData] = useState({
     name: connector?.name || "",
     connector_type: connector?.connector_type || "nats",
-    config: connector?.config || {},
     description: connector?.description || "",
-    tags: connector?.tags || [],
   });
+
+  const [config, setConfig] = useState<Record<string, any>>(
+    (connector?.config as Record<string, any>) || {}
+  );
+  const [tags, setTags] = useState<string[]>(connector?.tags || []);
+  const [tagInput, setTagInput] = useState("");
+
+  const updateConfig = (key: string, value: any) => {
+    setConfig((prev) => ({ ...prev, [key]: value }));
+  };
+
+  const addTag = () => {
+    if (tagInput.trim() && !tags.includes(tagInput.trim())) {
+      setTags([...tags, tagInput.trim()]);
+      setTagInput("");
+    }
+  };
+
+  const removeTag = (t: string) => setTags(tags.filter((tag) => tag !== t));
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
+
+    let finalConfig = { ...config };
+    if (
+      formData.connector_type === "nats" &&
+      typeof finalConfig.servers === "string"
+    ) {
+      finalConfig.servers = finalConfig.servers
+        .split(",")
+        .map((s: string) => s.trim());
+    }
+    if (
+      formData.connector_type === "kafka" &&
+      typeof finalConfig.brokers === "string"
+    ) {
+      finalConfig.brokers = finalConfig.brokers
+        .split(",")
+        .map((b: string) => b.trim());
+    }
+
+    const payload = {
+      ...formData,
+      config: finalConfig,
+      tags,
+    };
+
     if (connector) {
       updateMutation.mutate(
-        { name: connector.name.toString(), connector: formData as any },
+        { name: connector.name.toString(), connector: payload as any },
         { onSuccess: onClose }
       );
     } else {
-      createMutation.mutate(formData as any, { onSuccess: onClose });
+      createMutation.mutate(payload as any, { onSuccess: onClose });
     }
   };
 
@@ -162,43 +228,54 @@ const ConnectorForm: React.FC<{
         className="absolute inset-0 bg-slate-900/40 backdrop-blur-sm"
         onClick={onClose}
       />
-      <div className="relative bg-white w-full max-w-xl rounded-xl shadow-2xl p-8 animate-in zoom-in-95 duration-300 border border-slate-200">
-        <h2 className="text-xl font-bold text-slate-900 mb-6">
-          {connector ? "Edit Connector" : "Add New Connector"}
+      <div className="relative bg-white w-full max-w-2xl rounded-xl shadow-2xl p-8 animate-in zoom-in-95 duration-300 border border-slate-200 flex flex-col max-h-[90vh]">
+        <h2 className="text-xl font-bold text-slate-900 mb-6 sticky top-0 bg-white pb-2 flex justify-between items-center z-10">
+          <span>{connector ? "Edit Connector" : "Add New Connector"}</span>
+          <button
+            onClick={onClose}
+            className="text-slate-400 hover:text-slate-600 transition-colors"
+          >
+            <X size={20} />
+          </button>
         </h2>
 
-        <form onSubmit={handleSubmit} className="space-y-6">
-          <div className="space-y-2">
-            <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider ml-1">
-              Connector Name
-            </label>
-            <input
-              type="text"
-              required
-              disabled={!!connector}
-              className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-lg text-sm font-bold text-slate-900 focus:outline-none focus:border-indigo-500 transition-all disabled:opacity-50"
-              value={formData.name.toString()}
-              onChange={(e) =>
-                setFormData({ ...formData, name: e.target.value })
-              }
-            />
-          </div>
+        <form
+          onSubmit={handleSubmit}
+          className="space-y-6 overflow-y-auto pr-2 pb-4 scrollbar-thin"
+        >
+          <div className="grid grid-cols-2 gap-6">
+            <div className="space-y-2">
+              <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider ml-1">
+                Connector Name
+              </label>
+              <input
+                type="text"
+                required
+                disabled={!!connector}
+                className="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-lg text-sm font-bold text-slate-900 focus:outline-none focus:border-indigo-500 transition-all disabled:opacity-50"
+                value={formData.name.toString()}
+                onChange={(e) =>
+                  setFormData({ ...formData, name: e.target.value })
+                }
+              />
+            </div>
 
-          <div className="space-y-2">
-            <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider ml-1">
-              Type
-            </label>
-            <select
-              className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-lg text-sm font-bold text-slate-900 focus:outline-none focus:border-indigo-500 transition-all"
-              value={formData.connector_type.toString()}
-              onChange={(e) =>
-                setFormData({ ...formData, connector_type: e.target.value })
-              }
-            >
-              <option value="nats">NATS JetStream</option>
-              <option value="kafka">Apache Kafka</option>
-              <option value="postgres_cdc">PostgreSQL CDC</option>
-            </select>
+            <div className="space-y-2">
+              <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider ml-1">
+                Type
+              </label>
+              <select
+                className="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-lg text-sm font-bold text-slate-900 focus:outline-none focus:border-indigo-500 transition-all"
+                value={formData.connector_type.toString()}
+                onChange={(e) =>
+                  setFormData({ ...formData, connector_type: e.target.value })
+                }
+              >
+                <option value="nats">NATS JetStream</option>
+                <option value="kafka">Apache Kafka</option>
+                <option value="postgres_cdc">PostgreSQL CDC</option>
+              </select>
+            </div>
           </div>
 
           <div className="space-y-2">
@@ -206,19 +283,240 @@ const ConnectorForm: React.FC<{
               Description
             </label>
             <textarea
-              rows={3}
-              className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-lg text-sm font-medium text-slate-900 focus:outline-none focus:border-indigo-500 transition-all resize-none"
+              rows={2}
+              className="w-full px-4 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm font-medium text-slate-900 focus:outline-none focus:border-indigo-500 transition-all resize-none"
               value={formData.description}
               onChange={(e) =>
                 setFormData({ ...formData, description: e.target.value })
               }
+              placeholder="System description or notes..."
             />
           </div>
 
-          <div className="flex gap-3 pt-4 border-t border-slate-100">
+          <div className="pt-2">
+            <div className="text-[10px] font-bold text-indigo-600 uppercase tracking-wider mb-4 border-b border-indigo-100 pb-2">
+              Configuration Specifics
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              {formData.connector_type === "nats" && (
+                <>
+                  <div className="space-y-2 md:col-span-2">
+                    <label className="text-[10px] font-bold text-slate-500 uppercase">
+                      Server URLs (comma-separated)
+                    </label>
+                    <input
+                      type="text"
+                      className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-md text-xs font-bold focus:outline-none focus:border-indigo-400"
+                      value={
+                        Array.isArray(config.servers)
+                          ? config.servers.join(", ")
+                          : config.servers || "nats://localhost:4222"
+                      }
+                      onChange={(e) => updateConfig("servers", e.target.value)}
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <label className="text-[10px] font-bold text-slate-500 uppercase">
+                      Subject
+                    </label>
+                    <input
+                      type="text"
+                      className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-md text-xs font-bold focus:outline-none focus:border-indigo-400"
+                      value={config.subject || "cdc.events"}
+                      onChange={(e) => updateConfig("subject", e.target.value)}
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <label className="text-[10px] font-bold text-slate-500 uppercase">
+                      Consumer Group
+                    </label>
+                    <input
+                      type="text"
+                      className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-md text-xs font-bold focus:outline-none focus:border-indigo-400"
+                      value={config.consumer_group || ""}
+                      onChange={(e) =>
+                        updateConfig("consumer_group", e.target.value)
+                      }
+                      placeholder="Optional"
+                    />
+                  </div>
+                  <div className="flex items-center gap-3 pt-2">
+                    <input
+                      type="checkbox"
+                      id="use_jetstream"
+                      className="w-4 h-4 text-indigo-600 rounded border-slate-300 focus:ring-indigo-500"
+                      checked={config.use_jetstream || false}
+                      onChange={(e) =>
+                        updateConfig("use_jetstream", e.target.checked)
+                      }
+                    />
+                    <label
+                      htmlFor="use_jetstream"
+                      className="text-xs font-bold text-slate-700"
+                    >
+                      Enable JetStream
+                    </label>
+                  </div>
+                </>
+              )}
+
+              {formData.connector_type === "kafka" && (
+                <>
+                  <div className="space-y-2 md:col-span-2">
+                    <label className="text-[10px] font-bold text-slate-500 uppercase">
+                      Brokers (comma-separated)
+                    </label>
+                    <input
+                      type="text"
+                      className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-md text-xs font-bold focus:outline-none focus:border-indigo-400"
+                      value={
+                        Array.isArray(config.brokers)
+                          ? config.brokers.join(", ")
+                          : config.brokers || "localhost:9092"
+                      }
+                      onChange={(e) => updateConfig("brokers", e.target.value)}
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <label className="text-[10px] font-bold text-slate-500 uppercase">
+                      Topic
+                    </label>
+                    <input
+                      type="text"
+                      className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-md text-xs font-bold focus:outline-none focus:border-indigo-400"
+                      value={config.topic || "cdc-events"}
+                      onChange={(e) => updateConfig("topic", e.target.value)}
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <label className="text-[10px] font-bold text-slate-500 uppercase">
+                      Group ID
+                    </label>
+                    <input
+                      type="text"
+                      className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-md text-xs font-bold focus:outline-none focus:border-indigo-400"
+                      value={config.group_id || "cdc-consumer"}
+                      onChange={(e) => updateConfig("group_id", e.target.value)}
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <label className="text-[10px] font-bold text-slate-500 uppercase">
+                      Offset Reset
+                    </label>
+                    <select
+                      className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-md text-xs font-bold focus:outline-none focus:border-indigo-400"
+                      value={config.auto_offset_reset || "earliest"}
+                      onChange={(e) =>
+                        updateConfig("auto_offset_reset", e.target.value)
+                      }
+                    >
+                      <option value="earliest">Earliest</option>
+                      <option value="latest">Latest</option>
+                    </select>
+                  </div>
+                </>
+              )}
+
+              {formData.connector_type === "postgres_cdc" && (
+                <>
+                  <div className="space-y-2">
+                    <label className="text-[10px] font-bold text-slate-500 uppercase">
+                      Host
+                    </label>
+                    <input
+                      type="text"
+                      className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-md text-xs font-bold focus:outline-none focus:border-indigo-400"
+                      value={config.host || "localhost"}
+                      onChange={(e) => updateConfig("host", e.target.value)}
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <label className="text-[10px] font-bold text-slate-500 uppercase">
+                      Port
+                    </label>
+                    <input
+                      type="number"
+                      className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-md text-xs font-bold focus:outline-none focus:border-indigo-400"
+                      value={config.port || 5432}
+                      onChange={(e) =>
+                        updateConfig("port", parseInt(e.target.value))
+                      }
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <label className="text-[10px] font-bold text-slate-500 uppercase">
+                      User
+                    </label>
+                    <input
+                      type="text"
+                      className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-md text-xs font-bold focus:outline-none focus:border-indigo-400"
+                      value={config.username || "postgres"}
+                      onChange={(e) => updateConfig("username", e.target.value)}
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <label className="text-[10px] font-bold text-slate-500 uppercase">
+                      Database
+                    </label>
+                    <input
+                      type="text"
+                      className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-md text-xs font-bold focus:outline-none focus:border-indigo-400"
+                      value={config.database || ""}
+                      onChange={(e) => updateConfig("database", e.target.value)}
+                    />
+                  </div>
+                </>
+              )}
+            </div>
+          </div>
+
+          <div className="space-y-2 pt-2">
+            <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider ml-1">
+              Tags
+            </label>
+            <div className="flex gap-2">
+              <input
+                type="text"
+                className="flex-1 px-4 py-2 bg-slate-50 border border-slate-200 rounded-lg text-xs font-bold text-slate-900 focus:outline-none focus:border-indigo-500 transition-all"
+                value={tagInput}
+                onChange={(e) => setTagInput(e.target.value)}
+                onKeyDown={(e) =>
+                  e.key === "Enter" && (e.preventDefault(), addTag())
+                }
+                placeholder="Press Enter to add tag..."
+              />
+              <button
+                type="button"
+                onClick={addTag}
+                className="px-4 py-2 bg-slate-100 text-slate-600 rounded-lg text-xs font-bold hover:bg-slate-200 transition-all font-mono"
+              >
+                +
+              </button>
+            </div>
+            <div className="flex flex-wrap gap-1.5 mt-2">
+              {tags.map((t) => (
+                <span
+                  key={t}
+                  className="flex items-center gap-1 px-2 py-1 bg-indigo-50 border border-indigo-100 text-indigo-700 rounded text-[10px] font-bold"
+                >
+                  {t}
+                  <button
+                    type="button"
+                    onClick={() => removeTag(t)}
+                    className="hover:text-rose-600"
+                  >
+                    <X size={10} strokeWidth={3} />
+                  </button>
+                </span>
+              ))}
+            </div>
+          </div>
+
+          <div className="flex gap-3 pt-6 border-t border-slate-100 sticky bottom-0 bg-white shadow-[0_-10px_10px_-10px_rgba(0,0,0,0.05)]">
             <button
               type="button"
-              className="flex-1 px-4 py-2.5 bg-white border border-slate-200 rounded-lg text-sm font-bold text-slate-600 hover:bg-slate-50 transition-all"
+              className="px-6 py-2.5 bg-white border border-slate-200 rounded-lg text-sm font-bold text-slate-600 hover:bg-slate-50 transition-all"
               onClick={onClose}
             >
               Cancel

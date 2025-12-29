@@ -56,8 +56,43 @@ export const DestinationsPage: React.FC = () => {
           >
             <div className="px-6 py-4 border-b border-slate-100 flex justify-between items-center bg-slate-50/30">
               <div className="flex items-center gap-3">
-                <div className="w-8 h-8 rounded bg-emerald-50 text-emerald-600 flex items-center justify-center">
-                  <Database size={18} />
+                <div className="w-8 h-8 rounded bg-white border border-slate-100 flex items-center justify-center overflow-hidden p-1 shadow-sm">
+                  {destination.destination_type === "postgres" && (
+                    <img
+                      src="/logos/postgresql.svg"
+                      className="w-full h-full object-contain"
+                      alt="Postgres"
+                    />
+                  )}
+                  {destination.destination_type === "mysql" && (
+                    <img
+                      src="/logos/mysql.svg"
+                      className="w-full h-full object-contain"
+                      alt="MySQL"
+                    />
+                  )}
+                  {destination.destination_type === "clickhouse" && (
+                    <img
+                      src="/logos/clickhouse.svg"
+                      className="w-full h-full object-contain"
+                      alt="ClickHouse"
+                    />
+                  )}
+                  {destination.destination_type === "elasticsearch" && (
+                    <img
+                      src="/logos/elasticsearch.svg"
+                      className="w-full h-full object-contain"
+                      alt="Elasticsearch"
+                    />
+                  )}
+                  {![
+                    "postgres",
+                    "mysql",
+                    "clickhouse",
+                    "elasticsearch",
+                  ].includes(destination.destination_type.toString()) && (
+                    <Database size={18} className="text-emerald-600" />
+                  )}
                 </div>
                 <div>
                   <h3 className="text-sm font-bold text-slate-900">
@@ -113,8 +148,8 @@ export const DestinationsPage: React.FC = () => {
                 <Play size={12} fill="currentColor" />
                 Test Connection
               </button>
-              <div className="text-[10px] font-bold text-slate-400 uppercase tracking-widest text-emerald-600/60">
-                Optimized
+              <div className="text-[10px] font-bold text-slate-400 uppercase tracking-widest text-emerald-600/60 font-mono">
+                SINK OK
               </div>
             </div>
           </div>
@@ -139,20 +174,44 @@ const DestinationForm: React.FC<{
   const [formData, setFormData] = useState({
     name: destination?.name || "",
     destination_type: destination?.destination_type || "postgres",
-    config: destination?.config || {},
     description: destination?.description || "",
-    tags: destination?.tags || [],
   });
+
+  const [config, setConfig] = useState<Record<string, any>>(
+    (destination?.config as Record<string, any>) || {}
+  );
+  const [tags, setTags] = useState<string[]>(destination?.tags || []);
+  const [tagInput, setTagInput] = useState("");
+
+  const updateConfig = (key: string, value: any) => {
+    setConfig((prev) => ({ ...prev, [key]: value }));
+  };
+
+  const addTag = () => {
+    if (tagInput.trim() && !tags.includes(tagInput.trim())) {
+      setTags([...tags, tagInput.trim()]);
+      setTagInput("");
+    }
+  };
+
+  const removeTag = (t: string) => setTags(tags.filter((tag) => tag !== t));
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
+
+    const payload = {
+      ...formData,
+      config,
+      tags,
+    };
+
     if (destination) {
       updateMutation.mutate(
-        { name: destination.name.toString(), destination: formData as any },
+        { name: destination.name.toString(), destination: payload as any },
         { onSuccess: onClose }
       );
     } else {
-      createMutation.mutate(formData as any, { onSuccess: onClose });
+      createMutation.mutate(payload as any, { onSuccess: onClose });
     }
   };
 
@@ -162,44 +221,57 @@ const DestinationForm: React.FC<{
         className="absolute inset-0 bg-slate-900/40 backdrop-blur-sm"
         onClick={onClose}
       />
-      <div className="relative bg-white w-full max-w-xl rounded-xl shadow-2xl p-8 animate-in zoom-in-95 duration-300 border border-slate-200">
-        <h2 className="text-xl font-bold text-slate-900 mb-6">
-          {destination ? "Edit Destination" : "Add New Destination"}
+      <div className="relative bg-white w-full max-w-2xl rounded-xl shadow-2xl p-8 animate-in zoom-in-95 duration-300 border border-slate-200 flex flex-col max-h-[90vh]">
+        <h2 className="text-xl font-bold text-slate-900 mb-6 sticky top-0 bg-white pb-2 flex justify-between items-center z-10">
+          <span>
+            {destination ? "Edit Destination" : "Add New Destination"}
+          </span>
+          <button
+            onClick={onClose}
+            className="text-slate-400 hover:text-slate-600 transition-colors"
+          >
+            <X size={20} />
+          </button>
         </h2>
 
-        <form onSubmit={handleSubmit} className="space-y-6">
-          <div className="space-y-2">
-            <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider ml-1">
-              Destination Name
-            </label>
-            <input
-              type="text"
-              required
-              disabled={!!destination}
-              className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-lg text-sm font-bold text-slate-900 focus:outline-none focus:border-indigo-500 transition-all disabled:opacity-50"
-              value={formData.name.toString()}
-              onChange={(e) =>
-                setFormData({ ...formData, name: e.target.value })
-              }
-            />
-          </div>
+        <form
+          onSubmit={handleSubmit}
+          className="space-y-6 overflow-y-auto pr-2 pb-4 scrollbar-thin"
+        >
+          <div className="grid grid-cols-2 gap-6">
+            <div className="space-y-2">
+              <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider ml-1">
+                Destination Name
+              </label>
+              <input
+                type="text"
+                required
+                disabled={!!destination}
+                className="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-lg text-sm font-bold text-slate-900 focus:outline-none focus:border-indigo-500 transition-all disabled:opacity-50"
+                value={formData.name.toString()}
+                onChange={(e) =>
+                  setFormData({ ...formData, name: e.target.value })
+                }
+              />
+            </div>
 
-          <div className="space-y-2">
-            <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider ml-1">
-              Type
-            </label>
-            <select
-              className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-lg text-sm font-bold text-slate-900 focus:outline-none focus:border-indigo-500 transition-all"
-              value={formData.destination_type.toString()}
-              onChange={(e) =>
-                setFormData({ ...formData, destination_type: e.target.value })
-              }
-            >
-              <option value="postgres">PostgreSQL</option>
-              <option value="mysql">MySQL</option>
-              <option value="clickhouse">ClickHouse</option>
-              <option value="elasticsearch">Elasticsearch</option>
-            </select>
+            <div className="space-y-2">
+              <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider ml-1">
+                Type
+              </label>
+              <select
+                className="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-lg text-sm font-bold text-slate-900 focus:outline-none focus:border-indigo-500 transition-all"
+                value={formData.destination_type.toString()}
+                onChange={(e) =>
+                  setFormData({ ...formData, destination_type: e.target.value })
+                }
+              >
+                <option value="postgres">PostgreSQL</option>
+                <option value="mysql">MySQL</option>
+                <option value="clickhouse">ClickHouse</option>
+                <option value="elasticsearch">Elasticsearch</option>
+              </select>
+            </div>
           </div>
 
           <div className="space-y-2">
@@ -207,19 +279,215 @@ const DestinationForm: React.FC<{
               Description
             </label>
             <textarea
-              rows={3}
-              className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-lg text-sm font-medium text-slate-900 focus:outline-none focus:border-indigo-500 transition-all resize-none"
+              rows={2}
+              className="w-full px-4 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm font-medium text-slate-900 focus:outline-none focus:border-indigo-500 transition-all resize-none"
               value={formData.description}
               onChange={(e) =>
                 setFormData({ ...formData, description: e.target.value })
               }
+              placeholder="System description or notes..."
             />
           </div>
 
-          <div className="flex gap-3 pt-4 border-t border-slate-100">
+          <div className="pt-2">
+            <div className="text-[10px] font-bold text-indigo-600 uppercase tracking-wider mb-4 border-b border-indigo-100 pb-2">
+              Configuration Specifics
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              {(formData.destination_type === "postgres" ||
+                formData.destination_type === "mysql") && (
+                <>
+                  <div className="space-y-2">
+                    <label className="text-[10px] font-bold text-slate-500 uppercase">
+                      Host
+                    </label>
+                    <input
+                      type="text"
+                      className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-md text-xs font-bold focus:outline-none focus:border-indigo-400"
+                      value={config.host || "localhost"}
+                      onChange={(e) => updateConfig("host", e.target.value)}
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <label className="text-[10px] font-bold text-slate-500 uppercase">
+                      Port
+                    </label>
+                    <input
+                      type="number"
+                      className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-md text-xs font-bold focus:outline-none focus:border-indigo-400"
+                      value={
+                        config.port ||
+                        (formData.destination_type === "postgres" ? 5432 : 3306)
+                      }
+                      onChange={(e) =>
+                        updateConfig("port", parseInt(e.target.value))
+                      }
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <label className="text-[10px] font-bold text-slate-500 uppercase">
+                      User
+                    </label>
+                    <input
+                      type="text"
+                      className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-md text-xs font-bold focus:outline-none focus:border-indigo-400"
+                      value={config.username || "root"}
+                      onChange={(e) => updateConfig("username", e.target.value)}
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <label className="text-[10px] font-bold text-slate-500 uppercase">
+                      Password
+                    </label>
+                    <input
+                      type="password"
+                      className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-md text-xs font-bold focus:outline-none focus:border-indigo-400"
+                      value={config.password || ""}
+                      onChange={(e) => updateConfig("password", e.target.value)}
+                    />
+                  </div>
+                  <div className="space-y-2 md:col-span-2">
+                    <label className="text-[10px] font-bold text-slate-500 uppercase">
+                      Database
+                    </label>
+                    <input
+                      type="text"
+                      className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-md text-xs font-bold focus:outline-none focus:border-indigo-400"
+                      value={config.database || ""}
+                      onChange={(e) => updateConfig("database", e.target.value)}
+                    />
+                  </div>
+                </>
+              )}
+
+              {formData.destination_type === "clickhouse" && (
+                <>
+                  <div className="space-y-2 md:col-span-2">
+                    <label className="text-[10px] font-bold text-slate-500 uppercase">
+                      HTTP URL
+                    </label>
+                    <input
+                      type="text"
+                      className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-md text-xs font-bold focus:outline-none focus:border-indigo-400"
+                      value={config.url || "http://localhost:8123"}
+                      onChange={(e) => updateConfig("url", e.target.value)}
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <label className="text-[10px] font-bold text-slate-500 uppercase">
+                      Username
+                    </label>
+                    <input
+                      type="text"
+                      className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-md text-xs font-bold focus:outline-none focus:border-indigo-400"
+                      value={config.username || "default"}
+                      onChange={(e) => updateConfig("username", e.target.value)}
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <label className="text-[10px] font-bold text-slate-500 uppercase">
+                      Database
+                    </label>
+                    <input
+                      type="text"
+                      className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-md text-xs font-bold focus:outline-none focus:border-indigo-400"
+                      value={config.database || "default"}
+                      onChange={(e) => updateConfig("database", e.target.value)}
+                    />
+                  </div>
+                </>
+              )}
+
+              {formData.destination_type === "elasticsearch" && (
+                <>
+                  <div className="space-y-2 md:col-span-2">
+                    <label className="text-[10px] font-bold text-slate-500 uppercase">
+                      Nodes (comma-separated)
+                    </label>
+                    <input
+                      type="text"
+                      className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-md text-xs font-bold focus:outline-none focus:border-indigo-400"
+                      value={config.nodes || "http://localhost:9200"}
+                      onChange={(e) => updateConfig("nodes", e.target.value)}
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <label className="text-[10px] font-bold text-slate-500 uppercase">
+                      Index Prefix
+                    </label>
+                    <input
+                      type="text"
+                      className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-md text-xs font-bold focus:outline-none focus:border-indigo-400"
+                      value={config.index_prefix || "cdc-"}
+                      onChange={(e) =>
+                        updateConfig("index_prefix", e.target.value)
+                      }
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <label className="text-[10px] font-bold text-slate-500 uppercase">
+                      Cloud ID
+                    </label>
+                    <input
+                      type="text"
+                      className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-md text-xs font-bold focus:outline-none focus:border-indigo-400"
+                      value={config.cloud_id || ""}
+                      onChange={(e) => updateConfig("cloud_id", e.target.value)}
+                      placeholder="Optional"
+                    />
+                  </div>
+                </>
+              )}
+            </div>
+          </div>
+
+          <div className="space-y-2 pt-2">
+            <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider ml-1">
+              Tags
+            </label>
+            <div className="flex gap-2">
+              <input
+                type="text"
+                className="flex-1 px-4 py-2 bg-slate-50 border border-slate-200 rounded-lg text-xs font-bold text-slate-900 focus:outline-none focus:border-indigo-500 transition-all"
+                value={tagInput}
+                onChange={(e) => setTagInput(e.target.value)}
+                onKeyDown={(e) =>
+                  e.key === "Enter" && (e.preventDefault(), addTag())
+                }
+                placeholder="Press Enter to add tag..."
+              />
+              <button
+                type="button"
+                onClick={addTag}
+                className="px-4 py-2 bg-slate-100 text-slate-600 rounded-lg text-xs font-bold hover:bg-slate-200 transition-all font-mono"
+              >
+                +
+              </button>
+            </div>
+            <div className="flex flex-wrap gap-1.5 mt-2">
+              {tags.map((t) => (
+                <span
+                  key={t}
+                  className="flex items-center gap-1 px-2 py-1 bg-indigo-50 border border-indigo-100 text-indigo-700 rounded text-[10px] font-bold"
+                >
+                  {t}
+                  <button
+                    type="button"
+                    onClick={() => removeTag(t)}
+                    className="hover:text-rose-600"
+                  >
+                    <X size={10} strokeWidth={3} />
+                  </button>
+                </span>
+              ))}
+            </div>
+          </div>
+
+          <div className="flex gap-3 pt-6 border-t border-slate-100 sticky bottom-0 bg-white shadow-[0_-10px_10px_-10px_rgba(0,0,0,0.05)]">
             <button
               type="button"
-              className="flex-1 px-4 py-2.5 bg-white border border-slate-200 rounded-lg text-sm font-bold text-slate-600 hover:bg-slate-50 transition-all"
+              className="px-6 py-2.5 bg-white border border-slate-200 rounded-lg text-sm font-bold text-slate-600 hover:bg-slate-50 transition-all"
               onClick={onClose}
             >
               Cancel
