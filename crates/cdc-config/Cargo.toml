@@ -1,0 +1,13 @@
+[package]
+name = "cdc-config"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+cdc-core = { path = "../cdc-core" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+config = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }

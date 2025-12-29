@@ -1,0 +1,29 @@
+# Rust build artifacts
+target/
+**/*.rs.bk
+
+# Node modules
+node_modules/
+ui/dist/
+ui/build/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment files
+.env
+.env.local
+
+# Logs
+*.log
+
+# Database
+*.db
+*.sqlite
