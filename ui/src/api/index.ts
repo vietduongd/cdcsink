@@ -100,6 +100,16 @@ export const api = {
     return response.data;
   },
 
+  testConnectorConfig: async (
+    config: ConnectorConfigEntry
+  ): Promise<string> => {
+    const response = await axios.post(
+      `${API_BASE_URL}/api/connectors/test-config`,
+      config
+    );
+    return response.data;
+  },
+
   // Destinations
   listDestinations: async (): Promise<DestinationConfigEntry[]> => {
     const response = await axios.get<DestinationConfigEntry[]>(
@@ -135,6 +145,16 @@ export const api = {
   testDestination: async (name: string): Promise<string> => {
     const response = await axios.post(
       `${API_BASE_URL}/api/destinations/${name}/test`
+    );
+    return response.data;
+  },
+
+  testDestinationConfig: async (
+    config: DestinationConfigEntry
+  ): Promise<string> => {
+    const response = await axios.post(
+      `${API_BASE_URL}/api/destinations/test-config`,
+      config
     );
     return response.data;
   },

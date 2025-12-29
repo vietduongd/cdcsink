@@ -1,7 +1,18 @@
 import React, { useState } from "react";
 import { useDestinations, useDestinationMutations } from "../hooks/useQueries";
 import type { DestinationConfigEntry } from "../api";
-import { Plus, Edit2, Trash2, Play, Database, X, Check } from "lucide-react";
+import {
+  Plus,
+  Edit2,
+  Trash2,
+  Play,
+  Database,
+  X,
+  Check,
+  AlertCircle,
+  Loader2,
+} from "lucide-react";
+import { api } from "../api";
 
 export const DestinationsPage: React.FC = () => {
   const { data: destinations, isLoading } = useDestinations();
@@ -182,6 +193,10 @@ const DestinationForm: React.FC<{
   );
   const [tags, setTags] = useState<string[]>(destination?.tags || []);
   const [tagInput, setTagInput] = useState("");
+  const [testStatus, setTestStatus] = useState<
+    "idle" | "loading" | "success" | "error"
+  >("idle");
+  const [testMessage, setTestMessage] = useState("");
 
   const updateConfig = (key: string, value: any) => {
     setConfig((prev) => ({ ...prev, [key]: value }));
@@ -195,6 +210,30 @@ const DestinationForm: React.FC<{
   };
 
   const removeTag = (t: string) => setTags(tags.filter((tag) => tag !== t));
+
+  const handleTestConnection = async () => {
+    setTestStatus("loading");
+    setTestMessage("");
+
+    const testConfig: DestinationConfigEntry = {
+      name: formData.name || "test",
+      destination_type: formData.destination_type,
+      config,
+      description: formData.description,
+      tags,
+    };
+
+    try {
+      const result = await api.testDestinationConfig(testConfig);
+      setTestStatus("success");
+      setTestMessage(result || "Connection successful!");
+    } catch (error: any) {
+      setTestStatus("error");
+      setTestMessage(
+        error.response?.data || error.message || "Connection failed"
+      );
+    }
+  };
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -484,6 +523,25 @@ const DestinationForm: React.FC<{
             </div>
           </div>
 
+          {testStatus !== "idle" && (
+            <div
+              className={`p-3 rounded-lg flex items-center gap-2 text-sm font-medium ${
+                testStatus === "success"
+                  ? "bg-emerald-50 text-emerald-700 border border-emerald-200"
+                  : testStatus === "error"
+                  ? "bg-rose-50 text-rose-700 border border-rose-200"
+                  : "bg-slate-50 text-slate-700 border border-slate-200"
+              }`}
+            >
+              {testStatus === "loading" && (
+                <Loader2 size={16} className="animate-spin" />
+              )}
+              {testStatus === "success" && <Check size={16} />}
+              {testStatus === "error" && <AlertCircle size={16} />}
+              <span>{testMessage || "Testing connection..."}</span>
+            </div>
+          )}
+
           <div className="flex gap-3 pt-6 border-t border-slate-100 sticky bottom-0 bg-white shadow-[0_-10px_10px_-10px_rgba(0,0,0,0.05)]">
             <button
               type="button"
@@ -491,6 +549,19 @@ const DestinationForm: React.FC<{
               onClick={onClose}
             >
               Cancel
+            </button>
+            <button
+              type="button"
+              className="px-6 py-2.5 bg-amber-50 border border-amber-200 rounded-lg text-sm font-bold text-amber-700 hover:bg-amber-100 transition-all flex items-center gap-2"
+              onClick={handleTestConnection}
+              disabled={testStatus === "loading"}
+            >
+              {testStatus === "loading" ? (
+                <Loader2 size={16} className="animate-spin" />
+              ) : (
+                <Play size={16} />
+              )}
+              Test Connection
             </button>
             <button
               type="submit"

@@ -1,7 +1,18 @@
 import React, { useState } from "react";
 import { useConnectors, useConnectorMutations } from "../hooks/useQueries";
 import type { ConnectorConfigEntry } from "../api";
-import { Plus, Edit2, Trash2, Play, Cable, X, Check } from "lucide-react";
+import {
+  Plus,
+  Edit2,
+  Trash2,
+  Play,
+  Cable,
+  X,
+  Check,
+  AlertCircle,
+  Loader2,
+} from "lucide-react";
+import { api } from "../api";
 
 export const ConnectorsPage: React.FC = () => {
   const { data: connectors, isLoading } = useConnectors();
@@ -171,6 +182,14 @@ const ConnectorForm: React.FC<{
   );
   const [tags, setTags] = useState<string[]>(connector?.tags || []);
   const [tagInput, setTagInput] = useState("");
+  const [testStatus, setTestStatus] = useState<
+    "idle" | "loading" | "success" | "error"
+  >("idle");
+  const [testMessage, setTestMessage] = useState("");
+  const [showAdvanced, setShowAdvanced] = useState(false);
+  const [authType, setAuthType] = useState<"none" | "userpass" | "token">(
+    "none"
+  );
 
   const updateConfig = (key: string, value: any) => {
     setConfig((prev) => ({ ...prev, [key]: value }));
@@ -184,6 +203,48 @@ const ConnectorForm: React.FC<{
   };
 
   const removeTag = (t: string) => setTags(tags.filter((tag) => tag !== t));
+
+  const handleTestConnection = async () => {
+    setTestStatus("loading");
+    setTestMessage("");
+
+    let finalConfig = { ...config };
+    if (
+      formData.connector_type === "nats" &&
+      typeof finalConfig.servers === "string"
+    ) {
+      finalConfig.servers = finalConfig.servers
+        .split(",")
+        .map((s: string) => s.trim());
+    }
+    if (
+      formData.connector_type === "kafka" &&
+      typeof finalConfig.brokers === "string"
+    ) {
+      finalConfig.brokers = finalConfig.brokers
+        .split(",")
+        .map((b: string) => b.trim());
+    }
+
+    const testConfig: ConnectorConfigEntry = {
+      name: formData.name || "test",
+      connector_type: formData.connector_type,
+      config: finalConfig,
+      description: formData.description,
+      tags,
+    };
+
+    try {
+      const result = await api.testConnectorConfig(testConfig);
+      setTestStatus("success");
+      setTestMessage(result || "Connection successful!");
+    } catch (error: any) {
+      setTestStatus("error");
+      setTestMessage(
+        error.response?.data || error.message || "Connection failed"
+      );
+    }
+  };
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -358,6 +419,192 @@ const ConnectorForm: React.FC<{
                       Enable JetStream
                     </label>
                   </div>
+
+                  {/* Advanced Settings for NATS */}
+                  <div className="md:col-span-2 mt-4">
+                    <button
+                      type="button"
+                      onClick={() => setShowAdvanced(!showAdvanced)}
+                      className="flex items-center gap-2 text-xs font-bold text-indigo-600 hover:text-indigo-700 transition-colors"
+                    >
+                      <span>{showAdvanced ? "▼" : "▶"}</span>
+                      Advanced Settings
+                    </button>
+
+                    {showAdvanced && (
+                      <div className="mt-4 p-4 bg-slate-50/50 rounded-lg border border-slate-200 space-y-4">
+                        <div className="space-y-2">
+                          <label className="text-[10px] font-bold text-slate-500 uppercase">
+                            Authentication
+                          </label>
+                          <select
+                            className="w-full px-3 py-2 bg-white border border-slate-200 rounded-md text-xs font-bold focus:outline-none focus:border-indigo-400"
+                            value={authType}
+                            onChange={(e) => {
+                              const newAuthType = e.target.value as
+                                | "none"
+                                | "userpass"
+                                | "token";
+                              setAuthType(newAuthType);
+                              if (newAuthType === "none") {
+                                updateConfig("username", undefined);
+                                updateConfig("password", undefined);
+                                updateConfig("token", undefined);
+                              }
+                            }}
+                          >
+                            <option value="none">None</option>
+                            <option value="userpass">Username/Password</option>
+                            <option value="token">Token</option>
+                          </select>
+                        </div>
+
+                        {authType === "userpass" && (
+                          <>
+                            <div className="space-y-2">
+                              <label className="text-[10px] font-bold text-slate-500 uppercase">
+                                Username
+                              </label>
+                              <input
+                                type="text"
+                                className="w-full px-3 py-2 bg-white border border-slate-200 rounded-md text-xs font-bold focus:outline-none focus:border-indigo-400"
+                                value={config.username || ""}
+                                onChange={(e) =>
+                                  updateConfig("username", e.target.value)
+                                }
+                                placeholder="Enter username"
+                              />
+                            </div>
+                            <div className="space-y-2">
+                              <label className="text-[10px] font-bold text-slate-500 uppercase">
+                                Password
+                              </label>
+                              <input
+                                type="password"
+                                className="w-full px-3 py-2 bg-white border border-slate-200 rounded-md text-xs font-bold focus:outline-none focus:border-indigo-400"
+                                value={config.password || ""}
+                                onChange={(e) =>
+                                  updateConfig("password", e.target.value)
+                                }
+                                placeholder="Enter password"
+                              />
+                            </div>
+                          </>
+                        )}
+
+                        {authType === "token" && (
+                          <div className="space-y-2">
+                            <label className="text-[10px] font-bold text-slate-500 uppercase">
+                              Token
+                            </label>
+                            <input
+                              type="password"
+                              className="w-full px-3 py-2 bg-white border border-slate-200 rounded-md text-xs font-bold focus:outline-none focus:border-indigo-400"
+                              value={config.token || ""}
+                              onChange={(e) =>
+                                updateConfig("token", e.target.value)
+                              }
+                              placeholder="Enter authentication token"
+                            />
+                          </div>
+                        )}
+
+                        {/* Connection Settings */}
+                        <div className="pt-4 border-t border-slate-200">
+                          <div className="text-[10px] font-bold text-slate-600 uppercase mb-3">
+                            Connection Settings
+                          </div>
+                          <div className="grid grid-cols-2 gap-4">
+                            <div className="space-y-2">
+                              <label className="text-[10px] font-bold text-slate-500 uppercase">
+                                Connection Timeout (s)
+                              </label>
+                              <input
+                                type="number"
+                                className="w-full px-3 py-2 bg-white border border-slate-200 rounded-md text-xs font-bold focus:outline-none focus:border-indigo-400"
+                                value={config.connection_timeout || 30}
+                                onChange={(e) =>
+                                  updateConfig(
+                                    "connection_timeout",
+                                    parseInt(e.target.value)
+                                  )
+                                }
+                                min="1"
+                              />
+                            </div>
+                            <div className="space-y-2">
+                              <label className="text-[10px] font-bold text-slate-500 uppercase">
+                                Max Reconnect Attempts
+                              </label>
+                              <input
+                                type="number"
+                                className="w-full px-3 py-2 bg-white border border-slate-200 rounded-md text-xs font-bold focus:outline-none focus:border-indigo-400"
+                                value={config.max_reconnect_attempts || 10}
+                                onChange={(e) =>
+                                  updateConfig(
+                                    "max_reconnect_attempts",
+                                    parseInt(e.target.value)
+                                  )
+                                }
+                                min="0"
+                              />
+                            </div>
+                            <div className="space-y-2">
+                              <label className="text-[10px] font-bold text-slate-500 uppercase">
+                                Reconnect Wait (s)
+                              </label>
+                              <input
+                                type="number"
+                                className="w-full px-3 py-2 bg-white border border-slate-200 rounded-md text-xs font-bold focus:outline-none focus:border-indigo-400"
+                                value={config.reconnect_wait || 2}
+                                onChange={(e) =>
+                                  updateConfig(
+                                    "reconnect_wait",
+                                    parseInt(e.target.value)
+                                  )
+                                }
+                                min="1"
+                              />
+                            </div>
+                            <div className="space-y-2">
+                              <label className="text-[10px] font-bold text-slate-500 uppercase">
+                                Ping Interval (s)
+                              </label>
+                              <input
+                                type="number"
+                                className="w-full px-3 py-2 bg-white border border-slate-200 rounded-md text-xs font-bold focus:outline-none focus:border-indigo-400"
+                                value={config.ping_interval || 120}
+                                onChange={(e) =>
+                                  updateConfig(
+                                    "ping_interval",
+                                    parseInt(e.target.value)
+                                  )
+                                }
+                                min="1"
+                              />
+                            </div>
+                          </div>
+                          <div className="flex items-center gap-3 mt-4">
+                            <input
+                              type="checkbox"
+                              id="tls_enabled"
+                              className="w-4 h-4 text-indigo-600 rounded border-slate-300 focus:ring-indigo-500"
+                              checked={config.tls_enabled || false}
+                              onChange={(e) =>
+                                updateConfig("tls_enabled", e.target.checked)
+                              }
+                            />
+                            <label
+                              htmlFor="tls_enabled"
+                              className="text-xs font-bold text-slate-700"
+                            >
+                              Enable TLS/SSL
+                            </label>
+                          </div>
+                        </div>
+                      </div>
+                    )}
+                  </div>
                 </>
               )}
 
@@ -415,6 +662,175 @@ const ConnectorForm: React.FC<{
                       <option value="latest">Latest</option>
                     </select>
                   </div>
+
+                  {/* Advanced Settings for Kafka */}
+                  <div className="md:col-span-2 mt-4">
+                    <button
+                      type="button"
+                      onClick={() => setShowAdvanced(!showAdvanced)}
+                      className="flex items-center gap-2 text-xs font-bold text-indigo-600 hover:text-indigo-700 transition-colors"
+                    >
+                      <span>{showAdvanced ? "▼" : "▶"}</span>
+                      Advanced Settings
+                    </button>
+
+                    {showAdvanced && (
+                      <div className="mt-4 p-4 bg-slate-50/50 rounded-lg border border-slate-200 space-y-4">
+                        <div className="grid grid-cols-2 gap-4">
+                          <div className="space-y-2">
+                            <label className="text-[10px] font-bold text-slate-500 uppercase">
+                              Session Timeout (ms)
+                            </label>
+                            <input
+                              type="number"
+                              className="w-full px-3 py-2 bg-white border border-slate-200 rounded-md text-xs font-bold focus:outline-none focus:border-indigo-400"
+                              value={config.session_timeout_ms || 10000}
+                              onChange={(e) =>
+                                updateConfig(
+                                  "session_timeout_ms",
+                                  parseInt(e.target.value)
+                                )
+                              }
+                              min="1"
+                            />
+                          </div>
+                          <div className="space-y-2">
+                            <label className="text-[10px] font-bold text-slate-500 uppercase">
+                              Max Poll Records
+                            </label>
+                            <input
+                              type="number"
+                              className="w-full px-3 py-2 bg-white border border-slate-200 rounded-md text-xs font-bold focus:outline-none focus:border-indigo-400"
+                              value={config.max_poll_records || 500}
+                              onChange={(e) =>
+                                updateConfig(
+                                  "max_poll_records",
+                                  parseInt(e.target.value)
+                                )
+                              }
+                              min="1"
+                            />
+                          </div>
+                        </div>
+
+                        <div className="flex items-center gap-3">
+                          <input
+                            type="checkbox"
+                            id="enable_auto_commit"
+                            className="w-4 h-4 text-indigo-600 rounded border-slate-300 focus:ring-indigo-500"
+                            checked={config.enable_auto_commit !== false}
+                            onChange={(e) =>
+                              updateConfig(
+                                "enable_auto_commit",
+                                e.target.checked
+                              )
+                            }
+                          />
+                          <label
+                            htmlFor="enable_auto_commit"
+                            className="text-xs font-bold text-slate-700"
+                          >
+                            Enable Auto Commit
+                          </label>
+                        </div>
+
+                        <div className="pt-4 border-t border-slate-200">
+                          <div className="text-[10px] font-bold text-slate-600 uppercase mb-3">
+                            Security Settings
+                          </div>
+                          <div className="space-y-4">
+                            <div className="space-y-2">
+                              <label className="text-[10px] font-bold text-slate-500 uppercase">
+                                Security Protocol
+                              </label>
+                              <select
+                                className="w-full px-3 py-2 bg-white border border-slate-200 rounded-md text-xs font-bold focus:outline-none focus:border-indigo-400"
+                                value={config.security_protocol || "PLAINTEXT"}
+                                onChange={(e) =>
+                                  updateConfig(
+                                    "security_protocol",
+                                    e.target.value
+                                  )
+                                }
+                              >
+                                <option value="PLAINTEXT">PLAINTEXT</option>
+                                <option value="SSL">SSL</option>
+                                <option value="SASL_PLAINTEXT">
+                                  SASL_PLAINTEXT
+                                </option>
+                                <option value="SASL_SSL">SASL_SSL</option>
+                              </select>
+                            </div>
+
+                            {(config.security_protocol === "SASL_PLAINTEXT" ||
+                              config.security_protocol === "SASL_SSL") && (
+                              <>
+                                <div className="space-y-2">
+                                  <label className="text-[10px] font-bold text-slate-500 uppercase">
+                                    SASL Mechanism
+                                  </label>
+                                  <select
+                                    className="w-full px-3 py-2 bg-white border border-slate-200 rounded-md text-xs font-bold focus:outline-none focus:border-indigo-400"
+                                    value={config.sasl_mechanism || "PLAIN"}
+                                    onChange={(e) =>
+                                      updateConfig(
+                                        "sasl_mechanism",
+                                        e.target.value
+                                      )
+                                    }
+                                  >
+                                    <option value="PLAIN">PLAIN</option>
+                                    <option value="SCRAM-SHA-256">
+                                      SCRAM-SHA-256
+                                    </option>
+                                    <option value="SCRAM-SHA-512">
+                                      SCRAM-SHA-512
+                                    </option>
+                                  </select>
+                                </div>
+                                <div className="grid grid-cols-2 gap-4">
+                                  <div className="space-y-2">
+                                    <label className="text-[10px] font-bold text-slate-500 uppercase">
+                                      SASL Username
+                                    </label>
+                                    <input
+                                      type="text"
+                                      className="w-full px-3 py-2 bg-white border border-slate-200 rounded-md text-xs font-bold focus:outline-none focus:border-indigo-400"
+                                      value={config.sasl_username || ""}
+                                      onChange={(e) =>
+                                        updateConfig(
+                                          "sasl_username",
+                                          e.target.value
+                                        )
+                                      }
+                                      placeholder="Enter username"
+                                    />
+                                  </div>
+                                  <div className="space-y-2">
+                                    <label className="text-[10px] font-bold text-slate-500 uppercase">
+                                      SASL Password
+                                    </label>
+                                    <input
+                                      type="password"
+                                      className="w-full px-3 py-2 bg-white border border-slate-200 rounded-md text-xs font-bold focus:outline-none focus:border-indigo-400"
+                                      value={config.sasl_password || ""}
+                                      onChange={(e) =>
+                                        updateConfig(
+                                          "sasl_password",
+                                          e.target.value
+                                        )
+                                      }
+                                      placeholder="Enter password"
+                                    />
+                                  </div>
+                                </div>
+                              </>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    )}
+                  </div>
                 </>
               )}
 
@@ -466,6 +882,89 @@ const ConnectorForm: React.FC<{
                       onChange={(e) => updateConfig("database", e.target.value)}
                     />
                   </div>
+
+                  {/* Advanced Settings for PostgreSQL CDC */}
+                  <div className="md:col-span-2 mt-4">
+                    <button
+                      type="button"
+                      onClick={() => setShowAdvanced(!showAdvanced)}
+                      className="flex items-center gap-2 text-xs font-bold text-indigo-600 hover:text-indigo-700 transition-colors"
+                    >
+                      <span>{showAdvanced ? "▼" : "▶"}</span>
+                      Advanced Settings
+                    </button>
+
+                    {showAdvanced && (
+                      <div className="mt-4 p-4 bg-slate-50/50 rounded-lg border border-slate-200 space-y-4">
+                        <div className="grid grid-cols-2 gap-4">
+                          <div className="space-y-2">
+                            <label className="text-[10px] font-bold text-slate-500 uppercase">
+                              Slot Name
+                            </label>
+                            <input
+                              type="text"
+                              className="w-full px-3 py-2 bg-white border border-slate-200 rounded-md text-xs font-bold focus:outline-none focus:border-indigo-400"
+                              value={config.slot_name || "cdc_slot"}
+                              onChange={(e) =>
+                                updateConfig("slot_name", e.target.value)
+                              }
+                              placeholder="Replication slot name"
+                            />
+                          </div>
+                          <div className="space-y-2">
+                            <label className="text-[10px] font-bold text-slate-500 uppercase">
+                              Publication Name
+                            </label>
+                            <input
+                              type="text"
+                              className="w-full px-3 py-2 bg-white border border-slate-200 rounded-md text-xs font-bold focus:outline-none focus:border-indigo-400"
+                              value={
+                                config.publication_name || "cdc_publication"
+                              }
+                              onChange={(e) =>
+                                updateConfig("publication_name", e.target.value)
+                              }
+                              placeholder="Publication name"
+                            />
+                          </div>
+                          <div className="space-y-2">
+                            <label className="text-[10px] font-bold text-slate-500 uppercase">
+                              Poll Interval (ms)
+                            </label>
+                            <input
+                              type="number"
+                              className="w-full px-3 py-2 bg-white border border-slate-200 rounded-md text-xs font-bold focus:outline-none focus:border-indigo-400"
+                              value={config.poll_interval_ms || 1000}
+                              onChange={(e) =>
+                                updateConfig(
+                                  "poll_interval_ms",
+                                  parseInt(e.target.value)
+                                )
+                              }
+                              min="100"
+                            />
+                          </div>
+                          <div className="space-y-2">
+                            <label className="text-[10px] font-bold text-slate-500 uppercase">
+                              Snapshot Mode
+                            </label>
+                            <select
+                              className="w-full px-3 py-2 bg-white border border-slate-200 rounded-md text-xs font-bold focus:outline-none focus:border-indigo-400"
+                              value={config.snapshot_mode || "initial"}
+                              onChange={(e) =>
+                                updateConfig("snapshot_mode", e.target.value)
+                              }
+                            >
+                              <option value="initial">Initial</option>
+                              <option value="never">Never</option>
+                              <option value="always">Always</option>
+                              <option value="when_needed">When Needed</option>
+                            </select>
+                          </div>
+                        </div>
+                      </div>
+                    )}
+                  </div>
                 </>
               )}
             </div>
@@ -513,6 +1012,25 @@ const ConnectorForm: React.FC<{
             </div>
           </div>
 
+          {testStatus !== "idle" && (
+            <div
+              className={`p-3 rounded-lg flex items-center gap-2 text-sm font-medium ${
+                testStatus === "success"
+                  ? "bg-emerald-50 text-emerald-700 border border-emerald-200"
+                  : testStatus === "error"
+                  ? "bg-rose-50 text-rose-700 border border-rose-200"
+                  : "bg-slate-50 text-slate-700 border border-slate-200"
+              }`}
+            >
+              {testStatus === "loading" && (
+                <Loader2 size={16} className="animate-spin" />
+              )}
+              {testStatus === "success" && <Check size={16} />}
+              {testStatus === "error" && <AlertCircle size={16} />}
+              <span>{testMessage || "Testing connection..."}</span>
+            </div>
+          )}
+
           <div className="flex gap-3 pt-6 border-t border-slate-100 sticky bottom-0 bg-white shadow-[0_-10px_10px_-10px_rgba(0,0,0,0.05)]">
             <button
               type="button"
@@ -520,6 +1038,19 @@ const ConnectorForm: React.FC<{
               onClick={onClose}
             >
               Cancel
+            </button>
+            <button
+              type="button"
+              className="px-6 py-2.5 bg-amber-50 border border-amber-200 rounded-lg text-sm font-bold text-amber-700 hover:bg-amber-100 transition-all flex items-center gap-2"
+              onClick={handleTestConnection}
+              disabled={testStatus === "loading"}
+            >
+              {testStatus === "loading" ? (
+                <Loader2 size={16} className="animate-spin" />
+              ) : (
+                <Play size={16} />
+              )}
+              Test Connection
             </button>
             <button
               type="submit"
