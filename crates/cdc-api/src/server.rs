@@ -37,13 +37,17 @@ impl ApiServer {
                 get(connectors::list_connectors).post(connectors::create_connector),
             )
             .route(
-                "/api/connectors/:name",
+                "/api/connectors/{name}",
                 get(connectors::get_connector)
                     .put(connectors::update_connector)
                     .delete(connectors::delete_connector),
             )
             .route(
-                "/api/connectors/:name/test",
+                "/api/connectors/test-config",
+                post(connectors::test_connector_config),
+            )
+            .route(
+                "/api/connectors/{name}/test",
                 post(connectors::test_connector),
             )
             // Destination management
@@ -52,13 +56,17 @@ impl ApiServer {
                 get(destinations::list_destinations).post(destinations::create_destination),
             )
             .route(
-                "/api/destinations/:name",
+                "/api/destinations/{name}",
                 get(destinations::get_destination)
                     .put(destinations::update_destination)
                     .delete(destinations::delete_destination),
             )
             .route(
-                "/api/destinations/:name/test",
+                "/api/destinations/test-config",
+                post(destinations::test_destination_config),
+            )
+            .route(
+                "/api/destinations/{name}/test",
                 post(destinations::test_destination),
             )
             // Flow management
@@ -67,11 +75,11 @@ impl ApiServer {
                 get(flows::list_flows).post(flows::create_flow),
             )
             .route(
-                "/api/flows/:name",
+                "/api/flows/{name}",
                 get(flows::get_flow).delete(flows::delete_flow),
             )
-            .route("/api/flows/:name/start", put(flows::start_flow))
-            .route("/api/flows/:name/stop", put(flows::stop_flow))
+            .route("/api/flows/{name}/start", put(flows::start_flow))
+            .route("/api/flows/{name}/stop", put(flows::stop_flow))
             .with_state(self.state);
 
         if self.cors_enabled {

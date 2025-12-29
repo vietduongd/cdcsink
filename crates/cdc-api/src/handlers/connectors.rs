@@ -105,3 +105,29 @@ pub async fn test_connector(
         }
     }
 }
+
+pub async fn test_connector_config(
+    State(state): State<AppState>,
+    Json(entry): Json<ConnectorConfigEntry>,
+) -> Result<impl IntoResponse, StatusCode> {
+    // Get registry to create connector
+    let registry = &state.registry;
+    let connector_factory = registry
+        .get_connector_factory(&entry.connector_type)
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
+
+    let mut connector = connector_factory
+        .create(entry.config.clone())
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
+
+    // Try to connect
+    match connector.connect().await {
+        Ok(_) => {
+            connector.disconnect().await.ok();
+            Ok((StatusCode::OK, "Connection successful").into_response())
+        }
+        Err(e) => {
+            Ok((StatusCode::BAD_REQUEST, format!("Connection failed: {}", e)).into_response())
+        }
+    }
+}

@@ -175,21 +175,15 @@ async fn main() -> anyhow::Result<()> {
                 registry: registry.clone(),
             };
 
-            // Start API server in background
+            // Start API server
             let api_config = app_config.api.clone();
             let api_state = app_state.clone();
-            tokio::spawn(async move {
-                let server = ApiServer::new(
-                    api_config.host,
-                    api_config.port,
-                    api_config.cors_enabled,
-                    api_state,
-                );
-
-                if let Err(e) = server.run().await {
-                    error!("API server error: {}", e);
-                }
-            });
+            let server = ApiServer::new(
+                api_config.host,
+                api_config.port,
+                api_config.cors_enabled,
+                api_state,
+            );
 
             info!("CDC system started successfully");
             info!(
@@ -197,8 +191,17 @@ async fn main() -> anyhow::Result<()> {
                 app_config.api.host, app_config.api.port
             );
 
-            // Wait for all flows to complete (or run forever)
-            orchestrator.wait_all().await?;
+            // Wait for API server or shutdown signal
+            tokio::select! {
+                res = server.run() => {
+                    if let Err(e) = res {
+                        error!("API server error: {}", e);
+                    }
+                }
+                _ = tokio::signal::ctrl_c() => {
+                    info!("Shutting down CDC system...");
+                }
+            }
         }
 
         Commands::Validate { config_dir } => {

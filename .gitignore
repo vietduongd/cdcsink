@@ -22,3 +22,7 @@ Thumbs.db
 
 # Keep example
 !.env.example
+
+*.zip
+*.rar
+*.7z

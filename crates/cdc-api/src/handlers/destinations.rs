@@ -105,3 +105,29 @@ pub async fn test_destination(
         }
     }
 }
+
+pub async fn test_destination_config(
+    State(state): State<AppState>,
+    Json(entry): Json<DestinationConfigEntry>,
+) -> Result<impl IntoResponse, StatusCode> {
+    // Get registry to create destination
+    let registry = &state.registry;
+    let dest_factory = registry
+        .get_destination_factory(&entry.destination_type)
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
+
+    let mut destination = dest_factory
+        .create(entry.config.clone())
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
+
+    // Try to connect
+    match destination.connect().await {
+        Ok(_) => {
+            destination.disconnect().await.ok();
+            Ok((StatusCode::OK, "Connection successful").into_response())
+        }
+        Err(e) => {
+            Ok((StatusCode::BAD_REQUEST, format!("Connection failed: {}", e)).into_response())
+        }
+    }
+}
