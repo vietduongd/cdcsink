@@ -170,7 +170,9 @@ const getDefaultConfig = (connectorType: string): Record<string, any> => {
   switch (connectorType) {
     case "nats":
       return {
+        servers: "nats://localhost:4222",
         subject: "cdc.events",
+        use_jetstream: false,
         connection_timeout: 30,
         max_reconnect_attempts: 10,
         reconnect_wait: 2,
@@ -234,15 +236,6 @@ const ConnectorForm: React.FC<{
   const updateConfig = (key: string, value: any) => {
     setConfig((prev) => ({ ...prev, [key]: value }));
   };
-
-  // Update config with defaults when connector type changes
-  useEffect(() => {
-    if (!connector) {
-      // Only for new connectors
-      const defaults = getDefaultConfig(formData.connector_type as string);
-      setConfig((prev) => ({ ...defaults, ...prev }));
-    }
-  }, [formData.connector_type, connector]);
 
   const addTag = () => {
     if (tagInput.trim() && !tags.includes(tagInput.trim())) {

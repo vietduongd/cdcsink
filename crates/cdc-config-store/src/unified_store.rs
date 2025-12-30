@@ -172,4 +172,22 @@ impl UnifiedConfigStore {
             Self::Postgres(store) => store.validate_flow(flow).await,
         }
     }
+
+    /// Check if a connector is being used in any flow
+    pub async fn is_connector_in_use(&self, connector_name: &str) -> bool {
+        let flows = self.list_flows().await;
+        flows
+            .iter()
+            .any(|flow| flow.connector_name == connector_name)
+    }
+
+    /// Check if a destination is being used in any flow
+    pub async fn is_destination_in_use(&self, destination_name: &str) -> bool {
+        let flows = self.list_flows().await;
+        flows.iter().any(|flow| {
+            flow.destination_names
+                .iter()
+                .any(|name| name == destination_name)
+        })
+    }
 }

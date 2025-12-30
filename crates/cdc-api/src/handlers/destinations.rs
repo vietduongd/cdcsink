@@ -60,8 +60,17 @@ pub async fn delete_destination(
     State(state): State<AppState>,
     Path(name): Path<String>,
 ) -> ApiResponse<()> {
-    let mut store = state.config_store.write().await;
+    // Check if destination is used in any flow
+    let store = state.config_store.read().await;
+    if store.is_destination_in_use(&name).await {
+        return ApiResponse::<()>::conflict(
+            "Cannot delete destination: it is being used in one or more flows".to_string(),
+        );
+    }
+    drop(store);
 
+    // Proceed with deletion
+    let mut store = state.config_store.write().await;
     match store.delete_destination(&name).await {
         Ok(_) => ApiResponse::<()>::success_no_data("Destination deleted successfully"),
         Err(e) => ApiResponse::<()>::conflict(format!("Failed to delete destination: {}", e)),

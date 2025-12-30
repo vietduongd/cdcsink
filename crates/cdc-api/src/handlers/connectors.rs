@@ -60,8 +60,17 @@ pub async fn delete_connector(
     State(state): State<AppState>,
     Path(name): Path<String>,
 ) -> ApiResponse<()> {
-    let mut store = state.config_store.write().await;
+    // Check if connector is used in any flow
+    let store = state.config_store.read().await;
+    if store.is_connector_in_use(&name).await {
+        return ApiResponse::<()>::conflict(
+            "Cannot delete connector: it is being used in one or more flows".to_string(),
+        );
+    }
+    drop(store);
 
+    // Proceed with deletion
+    let mut store = state.config_store.write().await;
     match store.delete_connector(&name).await {
         Ok(_) => ApiResponse::<()>::success_no_data("Connector deleted successfully"),
         Err(e) => ApiResponse::<()>::conflict(format!("Failed to delete connector: {}", e)),

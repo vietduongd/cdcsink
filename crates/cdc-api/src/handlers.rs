@@ -19,23 +19,12 @@ pub struct AppState {
     pub registry: Arc<Registry>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct SystemStats {
     pub records_received: u64,
     pub records_written: u64,
     pub errors: u64,
     pub uptime_seconds: u64,
-}
-
-impl Default for SystemStats {
-    fn default() -> Self {
-        Self {
-            records_received: 0,
-            records_written: 0,
-            errors: 0,
-            uptime_seconds: 0,
-        }
-    }
 }
 
 #[derive(Serialize)]

@@ -4,19 +4,93 @@ use serde::{Deserialize, Serialize};
 use sqlx::postgres::{PgPool, PgPoolOptions};
 use tracing::{debug, error, info};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct PostgresConfig {
-    /// PostgreSQL connection URL
+    /// PostgreSQL connection URL (built from individual fields or provided directly)
     pub url: String,
 
     /// Maximum number of connections in the pool
+    #[serde(default = "default_max_connections")]
     pub max_connections: u32,
 
     /// Target schema name
+    #[serde(default = "default_schema")]
     pub schema: String,
 
     /// Conflict resolution strategy
+    #[serde(default)]
     pub conflict_resolution: ConflictResolution,
+}
+
+fn default_max_connections() -> u32 {
+    10
+}
+
+fn default_schema() -> String {
+    "public".to_string()
+}
+
+impl<'de> Deserialize<'de> for PostgresConfig {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de::Error;
+
+        #[derive(Deserialize)]
+        struct PostgresConfigHelper {
+            // Direct URL format
+            url: Option<String>,
+
+            // Individual fields format
+            host: Option<String>,
+            port: Option<u16>,
+            username: Option<String>,
+            password: Option<String>,
+            database: Option<String>,
+
+            // Optional configuration
+            #[serde(default = "default_max_connections")]
+            max_connections: u32,
+            #[serde(default = "default_schema")]
+            schema: String,
+            #[serde(default)]
+            conflict_resolution: ConflictResolution,
+        }
+
+        let helper = PostgresConfigHelper::deserialize(deserializer)?;
+
+        // Build URL from either direct URL or individual fields
+        let url = if let Some(url) = helper.url {
+            // Direct URL provided
+            url
+        } else if let (Some(host), Some(username)) = (helper.host, helper.username) {
+            // Build URL from individual fields
+            let port = helper.port.unwrap_or(5432);
+            let password = helper.password.unwrap_or_default();
+            let database = helper.database.unwrap_or_else(|| "postgres".to_string());
+
+            if password.is_empty() {
+                format!("postgresql://{}@{}:{}/{}", username, host, port, database)
+            } else {
+                format!(
+                    "postgresql://{}:{}@{}:{}/{}",
+                    username, password, host, port, database
+                )
+            }
+        } else {
+            return Err(D::Error::custom(
+                "Either 'url' or both 'host' and 'username' must be provided",
+            ));
+        };
+
+        Ok(PostgresConfig {
+            url,
+            max_connections: helper.max_connections,
+            schema: helper.schema,
+            conflict_resolution: helper.conflict_resolution,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -28,6 +102,12 @@ pub enum ConflictResolution {
     Replace,
     /// Ignore conflicts
     Ignore,
+}
+
+impl Default for ConflictResolution {
+    fn default() -> Self {
+        ConflictResolution::Upsert
+    }
 }
 
 impl Default for PostgresConfig {
