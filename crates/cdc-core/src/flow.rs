@@ -1,24 +1,24 @@
-use crate::{Connector, Destination, DataRecord, Result, Error, Registry};
+use crate::{Connector, DataRecord, Destination, Error, Registry, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tokio::task::JoinHandle;
-use tokio::sync::{mpsc, Mutex, RwLock};
-use tracing::{info, error, warn};
-use std::sync::Arc;
 use std::collections::HashMap;
+use std::sync::Arc;
+use tokio::sync::{mpsc, Mutex, RwLock};
+use tokio::task::JoinHandle;
+use tracing::{error, info, warn};
 
 /// Configuration structures for flows
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FlowConfig {
     /// Unique name for this flow
     pub name: String,
-    
+
     /// Connector configuration
     pub connector: ConnectorConfig,
-    
+
     /// List of destinations for this flow
     pub destinations: Vec<DestinationConfig>,
-    
+
     /// Batch size for writing to destinations
     pub batch_size: usize,
 }
@@ -28,7 +28,7 @@ pub struct ConnectorConfig {
     /// Type/name of the connector (e.g., "nats", "kafka")
     #[serde(rename = "type")]
     pub connector_type: String,
-    
+
     /// Connector-specific configuration
     pub config: Value,
 }
@@ -38,7 +38,7 @@ pub struct DestinationConfig {
     /// Type/name of the destination (e.g., "postgres", "mysql")
     #[serde(rename = "type")]
     pub destination_type: String,
-    
+
     /// Destination-specific configuration
     pub config: Value,
 }
@@ -125,20 +125,20 @@ impl Flow {
             control_rx: None,
         }
     }
-    
+
     pub fn with_control(mut self, control_rx: mpsc::Receiver<FlowCommand>) -> Self {
         self.control_rx = Some(control_rx);
         self
     }
-    
+
     /// Create a flow from configuration using the registry
     pub fn from_config(config: FlowConfig, registry: &Registry) -> Result<Self> {
         info!("Creating flow '{}'", config.name);
-        
+
         // Create connector
         let connector_factory = registry.get_connector_factory(&config.connector.connector_type)?;
         let connector = connector_factory.create(config.connector.config)?;
-        
+
         // Create destinations
         let mut destinations = Vec::new();
         for dest_config in config.destinations {
@@ -146,26 +146,31 @@ impl Flow {
             let destination = dest_factory.create(dest_config.config)?;
             destinations.push(destination);
         }
-        
-        Ok(Self::new(config.name, connector, destinations, config.batch_size))
+
+        Ok(Self::new(
+            config.name,
+            connector,
+            destinations,
+            config.batch_size,
+        ))
     }
-    
+
     /// Run the flow
     pub async fn run(mut self) -> Result<()> {
         info!("[{}] Starting flow", self.name);
-        
+
         // Connect to source
         self.connector.connect().await?;
         info!("[{}] Connector connected", self.name);
-        
+
         // Connect to destinations
         for (idx, dest) in self.destinations.iter_mut().enumerate() {
             dest.connect().await?;
             info!("[{}] Destination {} connected", self.name, idx);
         }
-        
+
         info!("[{}] Flow running", self.name);
-        
+
         loop {
             // Check for control commands
             if let Some(ref mut rx) = self.control_rx {
@@ -188,11 +193,11 @@ impl Flow {
                     }
                 }
             }
-            
+
             match self.connector.receive().await {
                 Ok(Some(record)) => {
                     self.buffer.push(record);
-                    
+
                     if self.buffer.len() >= self.batch_size {
                         self.flush().await?;
                     }
@@ -207,43 +212,49 @@ impl Flow {
                 }
             }
         }
-        
+
         // Flush remaining records
         if !self.buffer.is_empty() {
             self.flush().await?;
         }
-        
+
         // Disconnect
         self.connector.disconnect().await?;
         for dest in &mut self.destinations {
             dest.disconnect().await?;
         }
-        
+
         info!("[{}] Flow stopped", self.name);
         Ok(())
     }
-    
+
     async fn flush(&mut self) -> Result<()> {
         if self.buffer.is_empty() {
             return Ok(());
         }
-        
+
         let records = std::mem::take(&mut self.buffer);
         let count = records.len();
-        
+
         // Write to all destinations
         for (idx, dest) in self.destinations.iter_mut().enumerate() {
             match dest.write_batch(records.clone()).await {
                 Ok(_) => {
-                    info!("[{}] Flushed {} records to destination {}", self.name, count, idx);
+                    info!(
+                        "[{}] Flushed {} records to destination {}",
+                        self.name, count, idx
+                    );
                 }
                 Err(e) => {
-                    error!("[{}] Failed to flush records to destination {}: {}", self.name, idx, e);
+                    error!(
+                        "[{}] Failed to flush records to destination {}: {}",
+                        self.name, idx, e
+                    );
                     return Err(e);
                 }
             }
         }
-        
+
         Ok(())
     }
 }
@@ -265,7 +276,7 @@ impl FlowBuilder {
     pub fn new(registry: Arc<Registry>) -> Self {
         Self { registry }
     }
-    
+
     /// Build flow from connector/destination configs
     pub fn build_from_refs(
         &self,
@@ -278,7 +289,7 @@ impl FlowBuilder {
         // Create connector
         let connector_factory = self.registry.get_connector_factory(connector_type)?;
         let connector = connector_factory.create(connector_config.clone())?;
-        
+
         // Create destinations
         let mut dest_instances = Vec::new();
         for (dest_type, dest_config) in destinations {
@@ -286,7 +297,7 @@ impl FlowBuilder {
             let destination = dest_factory.create(dest_config.clone())?;
             dest_instances.push(destination);
         }
-        
+
         Ok(Flow::new(name, connector, dest_instances, batch_size))
     }
 }
@@ -302,24 +313,27 @@ impl FlowOrchestrator {
             flows: Arc::new(Mutex::new(HashMap::new())),
         }
     }
-    
+
     /// Add and start a new flow
     pub async fn add_flow(&self, mut flow: Flow) -> Result<()> {
         let name = flow.name.clone();
-        
+
         let mut flows = self.flows.lock().await;
         if flows.contains_key(&name) {
-            return Err(Error::Configuration(format!("Flow '{}' already exists", name)));
+            return Err(Error::Configuration(format!(
+                "Flow '{}' already exists",
+                name
+            )));
         }
-        
+
         // Create control channel
         let (tx, rx) = mpsc::channel(32);
         flow = flow.with_control(rx);
-        
+
         // Start flow
         let status = Arc::new(RwLock::new(FlowStatus::Running));
         let status_clone = status.clone();
-        
+
         let task_handle = tokio::spawn(async move {
             let result = flow.run().await;
             let mut s = status_clone.write().await;
@@ -329,55 +343,67 @@ impl FlowOrchestrator {
             };
             result
         });
-        
+
         let handle = FlowHandle {
             name: name.clone(),
             control_tx: tx,
             task_handle,
             status,
         };
-        
+
         flows.insert(name.clone(), handle);
         info!("Flow '{}' started", name);
         Ok(())
     }
-    
+
     /// Stop a running flow
     pub async fn stop_flow(&self, name: &str) -> Result<()> {
         let flows = self.flows.lock().await;
-        let handle = flows.get(name)
+        let handle = flows
+            .get(name)
             .ok_or_else(|| Error::Configuration(format!("Flow '{}' not found", name)))?;
-        
-        handle.control_tx.send(FlowCommand::Stop).await
+
+        // Send stop command
+        handle
+            .control_tx
+            .send(FlowCommand::Stop)
+            .await
             .map_err(|_| Error::Configuration("Failed to send stop command".to_string()))?;
-        
+
+        // Immediately update status to Stopped so API consumers see the change
+        {
+            let mut status = handle.status.write().await;
+            *status = FlowStatus::Stopped;
+        }
+
         info!("Stop command sent to flow '{}'", name);
         Ok(())
     }
-    
+
     /// Remove a stopped flow
     pub async fn remove_flow(&self, name: &str) -> Result<()> {
         let mut flows = self.flows.lock().await;
-        flows.remove(name)
+        flows
+            .remove(name)
             .ok_or_else(|| Error::Configuration(format!("Flow '{}' not found", name)))?;
-        
+
         info!("Flow '{}' removed", name);
         Ok(())
     }
-    
+
     /// List all flows
     pub async fn list_flows(&self) -> Vec<(String, FlowStatus)> {
         let flows = self.flows.lock().await;
         let mut result = Vec::new();
-        
+
         for (name, handle) in flows.iter() {
             let status = handle.status.read().await.clone();
             result.push((name.clone(), status));
         }
-        
+
         result
     }
-    
+
     /// Get flow status
     pub async fn get_flow_status(&self, name: &str) -> Option<FlowStatus> {
         let flows = self.flows.lock().await;
@@ -387,7 +413,7 @@ impl FlowOrchestrator {
             None
         }
     }
-    
+
     /// Wait for all flows to complete
     pub async fn wait_all(&self) -> Result<()> {
         loop {

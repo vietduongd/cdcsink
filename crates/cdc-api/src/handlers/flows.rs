@@ -13,8 +13,12 @@ use crate::{handlers::AppState, ApiResponse};
 pub struct FlowInfo {
     pub name: String,
     pub connector_name: String,
-    pub destination_count: usize,
+    pub destination_names: Vec<String>,
+    pub batch_size: usize,
+    pub auto_start: bool,
     pub status: FlowStatus,
+    #[serde(rename = "active")]
+    pub is_active: bool,
 }
 
 pub async fn list_flows(State(state): State<AppState>) -> impl IntoResponse {
@@ -27,11 +31,15 @@ pub async fn list_flows(State(state): State<AppState>) -> impl IntoResponse {
     let mut flows = Vec::new();
     for (name, status) in flow_statuses {
         if let Some(flow_config) = store.get_flow(&name).await {
+            let is_active = matches!(status, FlowStatus::Running);
             flows.push(FlowInfo {
                 name: name.clone(),
                 connector_name: flow_config.connector_name.clone(),
-                destination_count: flow_config.destination_names.len(),
+                destination_names: flow_config.destination_names.clone(),
+                batch_size: flow_config.batch_size,
+                auto_start: flow_config.auto_start,
                 status,
+                is_active,
             });
         }
     }
@@ -55,11 +63,16 @@ pub async fn get_flow(
         .await
         .unwrap_or(FlowStatus::Stopped);
 
+    let is_active = matches!(status, FlowStatus::Running);
+
     let info = FlowInfo {
         name: name.clone(),
         connector_name: flow_config.connector_name.clone(),
-        destination_count: flow_config.destination_names.len(),
+        destination_names: flow_config.destination_names.clone(),
+        batch_size: flow_config.batch_size,
+        auto_start: flow_config.auto_start,
         status,
+        is_active,
     };
 
     ApiResponse::success(info, "Flow retrieved successfully")
@@ -189,6 +202,9 @@ pub async fn start_flow(
         .collect();
 
     drop(store);
+
+    // Remove existing flow if it exists (e.g., if it was stopped)
+    state.orchestrator.remove_flow(&name).await.ok();
 
     // Build flow
     let builder = FlowBuilder::new(state.registry.clone());
