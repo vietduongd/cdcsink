@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import { useConnectors, useConnectorMutations } from "../hooks/useQueries";
 import type { ConnectorConfigEntry } from "../api";
 import {
@@ -165,6 +165,43 @@ export const ConnectorsPage: React.FC = () => {
   );
 };
 
+// Helper function to get default config for each connector type
+const getDefaultConfig = (connectorType: string): Record<string, any> => {
+  switch (connectorType) {
+    case "nats":
+      return {
+        subject: "cdc.events",
+        connection_timeout: 30,
+        max_reconnect_attempts: 10,
+        reconnect_wait: 2,
+        ping_interval: 120,
+        tls_enabled: false,
+      };
+    case "kafka":
+      return {
+        topic: "cdc-events",
+        group_id: "cdc-consumer",
+        auto_offset_reset: "earliest",
+        session_timeout_ms: 10000,
+        max_poll_records: 500,
+        enable_auto_commit: true,
+        security_protocol: "PLAINTEXT",
+      };
+    case "postgres_cdc":
+      return {
+        host: "localhost",
+        port: 5432,
+        username: "postgres",
+        slot_name: "cdc_slot",
+        publication_name: "cdc_publication",
+        poll_interval_ms: 1000,
+        snapshot_mode: "initial",
+      };
+    default:
+      return {};
+  }
+};
+
 const ConnectorForm: React.FC<{
   connector: ConnectorConfigEntry | null;
   onClose: () => void;
@@ -177,9 +214,12 @@ const ConnectorForm: React.FC<{
     description: connector?.description || "",
   });
 
-  const [config, setConfig] = useState<Record<string, any>>(
-    (connector?.config as Record<string, any>) || {}
-  );
+  // Initialize config with defaults merged with existing config
+  const [config, setConfig] = useState<Record<string, any>>(() => {
+    const defaults = getDefaultConfig(connector?.connector_type || "nats");
+    const existingConfig = (connector?.config as Record<string, any>) || {};
+    return { ...defaults, ...existingConfig };
+  });
   const [tags, setTags] = useState<string[]>(connector?.tags || []);
   const [tagInput, setTagInput] = useState("");
   const [testStatus, setTestStatus] = useState<
@@ -194,6 +234,15 @@ const ConnectorForm: React.FC<{
   const updateConfig = (key: string, value: any) => {
     setConfig((prev) => ({ ...prev, [key]: value }));
   };
+
+  // Update config with defaults when connector type changes
+  useEffect(() => {
+    if (!connector) {
+      // Only for new connectors
+      const defaults = getDefaultConfig(formData.connector_type as string);
+      setConfig((prev) => ({ ...defaults, ...prev }));
+    }
+  }, [formData.connector_type, connector]);
 
   const addTag = () => {
     if (tagInput.trim() && !tags.includes(tagInput.trim())) {
@@ -240,9 +289,9 @@ const ConnectorForm: React.FC<{
       setTestMessage(result || "Connection successful!");
     } catch (error: any) {
       setTestStatus("error");
-      setTestMessage(
-        error.response?.data || error.message || "Connection failed"
-      );
+      const errorMessage =
+        error.response?.data?.message || error.message || "Connection failed";
+      setTestMessage(errorMessage);
     }
   };
 

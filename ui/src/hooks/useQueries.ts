@@ -1,4 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import toast from "react-hot-toast";
 import { api } from "../api";
 import type {
   ConnectorConfigEntry,
@@ -35,8 +36,13 @@ export const useConnectorMutations = () => {
 
   const createMutation = useMutation({
     mutationFn: api.createConnector,
-    onSuccess: () =>
-      queryClient.invalidateQueries({ queryKey: ["connectors"] }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["connectors"] });
+      toast.success("Connector created successfully");
+    },
+    onError: (error: Error) => {
+      toast.error(error.message || "Failed to create connector");
+    },
   });
 
   const updateMutation = useMutation({
@@ -47,18 +53,31 @@ export const useConnectorMutations = () => {
       name: string;
       connector: ConnectorConfigEntry;
     }) => api.updateConnector(name, connector),
-    onSuccess: () =>
-      queryClient.invalidateQueries({ queryKey: ["connectors"] }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["connectors"] });
+      toast.success("Connector updated successfully");
+    },
+    onError: (error: Error) => {
+      toast.error(error.message || "Failed to update connector");
+    },
   });
 
   const deleteMutation = useMutation({
     mutationFn: api.deleteConnector,
-    onSuccess: () =>
-      queryClient.invalidateQueries({ queryKey: ["connectors"] }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["connectors"] });
+      toast.success("Connector deleted successfully");
+    },
+    onError: (error: Error) => {
+      toast.error(error.message || "Failed to delete connector");
+    },
   });
 
   const testMutation = useMutation({
     mutationFn: api.testConnector,
+    onError: (error: Error) => {
+      toast.error(error.message || "Connection test failed");
+    },
   });
 
   return { createMutation, updateMutation, deleteMutation, testMutation };
@@ -77,8 +96,13 @@ export const useDestinationMutations = () => {
 
   const createMutation = useMutation({
     mutationFn: api.createDestination,
-    onSuccess: () =>
-      queryClient.invalidateQueries({ queryKey: ["destinations"] }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["destinations"] });
+      toast.success("Destination created successfully");
+    },
+    onError: (error: Error) => {
+      toast.error(error.message || "Failed to create destination");
+    },
   });
 
   const updateMutation = useMutation({
@@ -89,18 +113,31 @@ export const useDestinationMutations = () => {
       name: string;
       destination: DestinationConfigEntry;
     }) => api.updateDestination(name, destination),
-    onSuccess: () =>
-      queryClient.invalidateQueries({ queryKey: ["destinations"] }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["destinations"] });
+      toast.success("Destination updated successfully");
+    },
+    onError: (error: Error) => {
+      toast.error(error.message || "Failed to update destination");
+    },
   });
 
   const deleteMutation = useMutation({
     mutationFn: api.deleteDestination,
-    onSuccess: () =>
-      queryClient.invalidateQueries({ queryKey: ["destinations"] }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["destinations"] });
+      toast.success("Destination deleted successfully");
+    },
+    onError: (error: Error) => {
+      toast.error(error.message || "Failed to delete destination");
+    },
   });
 
   const testMutation = useMutation({
     mutationFn: api.testDestination,
+    onError: (error: Error) => {
+      toast.error(error.message || "Connection test failed");
+    },
   });
 
   return { createMutation, updateMutation, deleteMutation, testMutation };
@@ -120,22 +157,46 @@ export const useFlowMutations = () => {
 
   const createMutation = useMutation({
     mutationFn: api.createFlow,
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["flows"] }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["flows"] });
+      toast.success("Flow created successfully");
+    },
+    onError: (error: Error) => {
+      toast.error(error.message || "Failed to create flow");
+    },
   });
 
   const deleteMutation = useMutation({
     mutationFn: api.deleteFlow,
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["flows"] }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["flows"] });
+      toast.success("Flow deleted successfully");
+    },
+    onError: (error: Error) => {
+      toast.error(error.message || "Failed to delete flow");
+    },
   });
 
   const startMutation = useMutation({
     mutationFn: api.startFlow,
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["flows"] }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["flows"] });
+      toast.success("Flow started successfully");
+    },
+    onError: (error: Error) => {
+      toast.error(error.message || "Failed to start flow");
+    },
   });
 
   const stopMutation = useMutation({
     mutationFn: api.stopFlow,
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["flows"] }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["flows"] });
+      toast.success("Flow stopped successfully");
+    },
+    onError: (error: Error) => {
+      toast.error(error.message || "Failed to stop flow");
+    },
   });
 
   return { createMutation, deleteMutation, startMutation, stopMutation };

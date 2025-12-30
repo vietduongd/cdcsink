@@ -1,14 +1,11 @@
-use axum::{
-    extract::State,
-    http::StatusCode,
-    response::IntoResponse,
-    Json,
-};
+use axum::{extract::State, response::IntoResponse};
 use cdc_config_store::UnifiedConfigStore;
 use cdc_core::{FlowOrchestrator, Registry};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::RwLock;
+
+use crate::ApiResponse;
 
 pub mod connectors;
 pub mod destinations;
@@ -57,27 +54,31 @@ pub struct StatsResponse {
 
 pub async fn health_check(State(state): State<AppState>) -> impl IntoResponse {
     let stats = state.stats.read().await;
-    
-    Json(HealthResponse {
+
+    let response = HealthResponse {
         status: "healthy".to_string(),
         uptime_seconds: stats.uptime_seconds,
-    })
+    };
+
+    ApiResponse::success(response, "System is healthy")
 }
 
 pub async fn get_stats(State(state): State<AppState>) -> impl IntoResponse {
     let stats = state.stats.read().await;
-    
-    Json(StatsResponse {
+
+    let response = StatsResponse {
         records_received: stats.records_received,
         records_written: stats.records_written,
         errors: stats.errors,
         uptime_seconds: stats.uptime_seconds,
-    })
+    };
+
+    ApiResponse::success(response, "Stats retrieved successfully")
 }
 
-pub async fn reset_stats(State(state): State<AppState>) -> impl IntoResponse {
+pub async fn reset_stats(State(state): State<AppState>) -> ApiResponse<()> {
     let mut stats = state.stats.write().await;
     *stats = SystemStats::default();
-    
-    (StatusCode::OK, "Stats reset successfully")
+
+    ApiResponse::<()>::success_no_data("Stats reset successfully")
 }

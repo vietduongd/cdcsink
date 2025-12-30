@@ -1,6 +1,5 @@
 use axum::{
     extract::{Path, State},
-    http::StatusCode,
     response::IntoResponse,
     Json,
 };
@@ -8,7 +7,7 @@ use cdc_config_store::FlowConfigEntry;
 use cdc_core::{FlowBuilder, FlowStatus};
 use serde::Serialize;
 
-use crate::handlers::AppState;
+use crate::{handlers::AppState, ApiResponse};
 
 #[derive(Serialize)]
 pub struct FlowInfo {
@@ -37,15 +36,18 @@ pub async fn list_flows(State(state): State<AppState>) -> impl IntoResponse {
         }
     }
 
-    Json(flows)
+    ApiResponse::success(flows, "Flows retrieved successfully")
 }
 
 pub async fn get_flow(
     State(state): State<AppState>,
     Path(name): Path<String>,
-) -> Result<impl IntoResponse, StatusCode> {
+) -> impl IntoResponse {
     let store = state.config_store.read().await;
-    let flow_config = store.get_flow(&name).await.ok_or(StatusCode::NOT_FOUND)?;
+    let flow_config = match store.get_flow(&name).await {
+        Some(config) => config,
+        None => return ApiResponse::not_found("Flow"),
+    };
 
     let status = state
         .orchestrator
@@ -60,19 +62,18 @@ pub async fn get_flow(
         status,
     };
 
-    Ok(Json(info))
+    ApiResponse::success(info, "Flow retrieved successfully")
 }
 
 pub async fn create_flow(
     State(state): State<AppState>,
     Json(entry): Json<FlowConfigEntry>,
-) -> Result<impl IntoResponse, StatusCode> {
+) -> ApiResponse<()> {
     // Add to config store
     let mut store = state.config_store.write().await;
-    store
-        .add_flow(entry.clone())
-        .await
-        .map_err(|_| StatusCode::BAD_REQUEST)?;
+    if let Err(e) = store.add_flow(entry.clone()).await {
+        return ApiResponse::<()>::bad_request(format!("Failed to create flow: {}", e));
+    }
 
     // Build and start flow if auto_start
     if entry.auto_start {
@@ -81,18 +82,23 @@ pub async fn create_flow(
         let store_read = state.config_store.read().await;
 
         // Get connector config
-        let connector_entry = store_read
-            .get_connector(&entry.connector_name)
-            .await
-            .ok_or(StatusCode::BAD_REQUEST)?;
+        let connector_entry = match store_read.get_connector(&entry.connector_name).await {
+            Some(c) => c,
+            None => return ApiResponse::<()>::bad_request("Connector not found"),
+        };
 
         // Get destination configs
         let mut dest_entries = Vec::new();
         for dest_name in &entry.destination_names {
-            let dest_entry = store_read
-                .get_destination(dest_name)
-                .await
-                .ok_or(StatusCode::BAD_REQUEST)?;
+            let dest_entry = match store_read.get_destination(dest_name).await {
+                Some(d) => d,
+                None => {
+                    return ApiResponse::<()>::bad_request(format!(
+                        "Destination {} not found",
+                        dest_name
+                    ))
+                }
+            };
             dest_entries.push(dest_entry);
         }
 
@@ -103,31 +109,32 @@ pub async fn create_flow(
 
         // Build flow
         let builder = FlowBuilder::new(state.registry.clone());
-        let flow = builder
-            .build_from_refs(
-                entry.name.clone(),
-                &connector_entry.connector_type,
-                &connector_entry.config,
-                dest_configs,
-                entry.batch_size,
-            )
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        let flow = match builder.build_from_refs(
+            entry.name.clone(),
+            &connector_entry.connector_type,
+            &connector_entry.config,
+            dest_configs,
+            entry.batch_size,
+        ) {
+            Ok(f) => f,
+            Err(e) => {
+                return ApiResponse::<()>::internal_error(format!("Failed to build flow: {}", e))
+            }
+        };
 
         // Start flow
-        state
-            .orchestrator
-            .add_flow(flow)
-            .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        if let Err(e) = state.orchestrator.add_flow(flow).await {
+            return ApiResponse::<()>::internal_error(format!("Failed to start flow: {}", e));
+        }
     }
 
-    Ok(StatusCode::CREATED)
+    ApiResponse::<()>::success_no_data("Flow created successfully")
 }
 
 pub async fn delete_flow(
     State(state): State<AppState>,
     Path(name): Path<String>,
-) -> Result<impl IntoResponse, StatusCode> {
+) -> ApiResponse<()> {
     // Stop flow first
     state.orchestrator.stop_flow(&name).await.ok();
 
@@ -139,34 +146,40 @@ pub async fn delete_flow(
 
     // Remove from config store
     let mut store = state.config_store.write().await;
-    store
-        .delete_flow(&name)
-        .await
-        .map_err(|_| StatusCode::NOT_FOUND)?;
-
-    Ok(StatusCode::NO_CONTENT)
+    match store.delete_flow(&name).await {
+        Ok(_) => ApiResponse::<()>::success_no_data("Flow deleted successfully"),
+        Err(_) => ApiResponse::<()>::not_found("Flow"),
+    }
 }
 
 pub async fn start_flow(
     State(state): State<AppState>,
     Path(name): Path<String>,
-) -> Result<impl IntoResponse, StatusCode> {
+) -> ApiResponse<()> {
     let store = state.config_store.read().await;
-    let entry = store.get_flow(&name).await.ok_or(StatusCode::NOT_FOUND)?;
+    let entry = match store.get_flow(&name).await {
+        Some(e) => e,
+        None => return ApiResponse::<()>::not_found("Flow"),
+    };
 
     // Get connector config
-    let connector_entry = store
-        .get_connector(&entry.connector_name)
-        .await
-        .ok_or(StatusCode::BAD_REQUEST)?;
+    let connector_entry = match store.get_connector(&entry.connector_name).await {
+        Some(c) => c,
+        None => return ApiResponse::<()>::bad_request("Connector not found"),
+    };
 
     // Get destination configs
     let mut dest_entries = Vec::new();
     for dest_name in &entry.destination_names {
-        let dest_entry = store
-            .get_destination(dest_name)
-            .await
-            .ok_or(StatusCode::BAD_REQUEST)?;
+        let dest_entry = match store.get_destination(dest_name).await {
+            Some(d) => d,
+            None => {
+                return ApiResponse::<()>::bad_request(format!(
+                    "Destination {} not found",
+                    dest_name
+                ))
+            }
+        };
         dest_entries.push(dest_entry);
     }
 
@@ -179,35 +192,27 @@ pub async fn start_flow(
 
     // Build flow
     let builder = FlowBuilder::new(state.registry.clone());
-    let flow = builder
-        .build_from_refs(
-            entry.name.clone(),
-            &connector_entry.connector_type,
-            &connector_entry.config,
-            dest_configs,
-            entry.batch_size,
-        )
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let flow = match builder.build_from_refs(
+        entry.name.clone(),
+        &connector_entry.connector_type,
+        &connector_entry.config,
+        dest_configs,
+        entry.batch_size,
+    ) {
+        Ok(f) => f,
+        Err(e) => return ApiResponse::<()>::internal_error(format!("Failed to build flow: {}", e)),
+    };
 
     // Start flow
-    state
-        .orchestrator
-        .add_flow(flow)
-        .await
-        .map_err(|_| StatusCode::CONFLICT)?;
-
-    Ok(StatusCode::OK)
+    match state.orchestrator.add_flow(flow).await {
+        Ok(_) => ApiResponse::<()>::success_no_data("Flow started successfully"),
+        Err(e) => ApiResponse::<()>::conflict(format!("Failed to start flow: {}", e)),
+    }
 }
 
-pub async fn stop_flow(
-    State(state): State<AppState>,
-    Path(name): Path<String>,
-) -> Result<impl IntoResponse, StatusCode> {
-    state
-        .orchestrator
-        .stop_flow(&name)
-        .await
-        .map_err(|_| StatusCode::NOT_FOUND)?;
-
-    Ok(StatusCode::OK)
+pub async fn stop_flow(State(state): State<AppState>, Path(name): Path<String>) -> ApiResponse<()> {
+    match state.orchestrator.stop_flow(&name).await {
+        Ok(_) => ApiResponse::<()>::success_no_data("Flow stopped successfully"),
+        Err(_) => ApiResponse::<()>::not_found("Flow"),
+    }
 }

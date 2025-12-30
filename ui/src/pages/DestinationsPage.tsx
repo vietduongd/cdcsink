@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import { useDestinations, useDestinationMutations } from "../hooks/useQueries";
 import type { DestinationConfigEntry } from "../api";
 import {
@@ -177,6 +177,26 @@ export const DestinationsPage: React.FC = () => {
   );
 };
 
+// Helper function to get default config for each destination type
+const getDefaultDestinationConfig = (
+  destinationType: string
+): Record<string, any> => {
+  switch (destinationType) {
+    case "postgres":
+      return {
+        host: "localhost",
+        port: 5432,
+        username: "postgres",
+      };
+    case "kafka":
+      return {
+        topic: "cdc-output",
+      };
+    default:
+      return {};
+  }
+};
+
 const DestinationForm: React.FC<{
   destination: DestinationConfigEntry | null;
   onClose: () => void;
@@ -188,9 +208,14 @@ const DestinationForm: React.FC<{
     description: destination?.description || "",
   });
 
-  const [config, setConfig] = useState<Record<string, any>>(
-    (destination?.config as Record<string, any>) || {}
-  );
+  // Initialize config with defaults merged with existing config
+  const [config, setConfig] = useState<Record<string, any>>(() => {
+    const defaults = getDefaultDestinationConfig(
+      (destination?.destination_type as string) || "postgres"
+    );
+    const existingConfig = (destination?.config as Record<string, any>) || {};
+    return { ...defaults, ...existingConfig };
+  });
   const [tags, setTags] = useState<string[]>(destination?.tags || []);
   const [tagInput, setTagInput] = useState("");
   const [testStatus, setTestStatus] = useState<
@@ -229,9 +254,9 @@ const DestinationForm: React.FC<{
       setTestMessage(result || "Connection successful!");
     } catch (error: any) {
       setTestStatus("error");
-      setTestMessage(
-        error.response?.data || error.message || "Connection failed"
-      );
+      const errorMessage =
+        error.response?.data?.message || error.message || "Connection failed";
+      setTestMessage(errorMessage);
     }
   };
 

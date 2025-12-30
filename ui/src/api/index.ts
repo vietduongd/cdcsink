@@ -2,6 +2,36 @@ import axios from "axios";
 
 const API_BASE_URL = import.meta.env.VITE_API_URL || "http://localhost:3000";
 
+// Standardized API Response format
+interface ApiResponse<T> {
+  data: T | null;
+  message: string;
+  code: string;
+  errors: string[];
+}
+
+// Helper function to extract data from API response
+const extractData = <T>(response: ApiResponse<T>): T => {
+  if (response.code !== "SUCCESS") {
+    const errorMessage =
+      response.message || response.errors.join(", ") || "Unknown error";
+    throw new Error(errorMessage);
+  }
+  if (response.data === null) {
+    throw new Error("No data in response");
+  }
+  return response.data;
+};
+
+// Helper for operations without data
+const checkSuccess = (response: ApiResponse<void>): void => {
+  if (response.code !== "SUCCESS") {
+    const errorMessage =
+      response.message || response.errors.join(", ") || "Unknown error";
+    throw new Error(errorMessage);
+  }
+};
+
 export interface HealthResponse {
   status: string;
   uptime_seconds: number;
@@ -15,8 +45,8 @@ export interface StatsResponse {
 }
 
 export interface ConnectorConfigEntry {
-  name: String;
-  connector_type: String;
+  name: string;
+  connector_type: string;
   config: any;
   description?: string;
   tags?: string[];
@@ -48,145 +78,189 @@ export interface FlowConfigEntry {
 
 export const api = {
   getHealth: async (): Promise<HealthResponse> => {
-    const response = await axios.get<HealthResponse>(`${API_BASE_URL}/health`);
-    return response.data;
+    const response = await axios.get<ApiResponse<HealthResponse>>(
+      `${API_BASE_URL}/health`
+    );
+    return extractData(response.data);
   },
 
   getStats: async (): Promise<StatsResponse> => {
-    const response = await axios.get<StatsResponse>(
+    const response = await axios.get<ApiResponse<StatsResponse>>(
       `${API_BASE_URL}/api/stats`
     );
-    return response.data;
+    return extractData(response.data);
   },
 
   resetStats: async (): Promise<void> => {
-    await axios.post(`${API_BASE_URL}/api/stats/reset`);
+    const response = await axios.post<ApiResponse<void>>(
+      `${API_BASE_URL}/api/stats/reset`
+    );
+    checkSuccess(response.data);
   },
 
   // Connectors
   listConnectors: async (): Promise<ConnectorConfigEntry[]> => {
-    const response = await axios.get<ConnectorConfigEntry[]>(
+    const response = await axios.get<ApiResponse<ConnectorConfigEntry[]>>(
       `${API_BASE_URL}/api/connectors`
     );
-    return response.data;
+    return extractData(response.data);
   },
 
   getConnector: async (name: string): Promise<ConnectorConfigEntry> => {
-    const response = await axios.get<ConnectorConfigEntry>(
+    const response = await axios.get<ApiResponse<ConnectorConfigEntry>>(
       `${API_BASE_URL}/api/connectors/${name}`
     );
-    return response.data;
+    return extractData(response.data);
   },
 
   createConnector: async (connector: ConnectorConfigEntry): Promise<void> => {
-    await axios.post(`${API_BASE_URL}/api/connectors`, connector);
+    const response = await axios.post<ApiResponse<void>>(
+      `${API_BASE_URL}/api/connectors`,
+      connector
+    );
+    checkSuccess(response.data);
   },
 
   updateConnector: async (
     name: string,
     connector: ConnectorConfigEntry
   ): Promise<void> => {
-    await axios.put(`${API_BASE_URL}/api/connectors/${name}`, connector);
+    const response = await axios.put<ApiResponse<void>>(
+      `${API_BASE_URL}/api/connectors/${name}`,
+      connector
+    );
+    checkSuccess(response.data);
   },
 
   deleteConnector: async (name: string): Promise<void> => {
-    await axios.delete(`${API_BASE_URL}/api/connectors/${name}`);
+    const response = await axios.delete<ApiResponse<void>>(
+      `${API_BASE_URL}/api/connectors/${name}`
+    );
+    checkSuccess(response.data);
   },
 
   testConnector: async (name: string): Promise<string> => {
-    const response = await axios.post(
+    const response = await axios.post<ApiResponse<void>>(
       `${API_BASE_URL}/api/connectors/${name}/test`
     );
-    return response.data;
+    checkSuccess(response.data);
+    return response.data.message;
   },
 
   testConnectorConfig: async (
     config: ConnectorConfigEntry
   ): Promise<string> => {
-    const response = await axios.post(
+    const response = await axios.post<ApiResponse<void>>(
       `${API_BASE_URL}/api/connectors/test-config`,
       config
     );
-    return response.data;
+    checkSuccess(response.data);
+    return response.data.message;
   },
 
   // Destinations
   listDestinations: async (): Promise<DestinationConfigEntry[]> => {
-    const response = await axios.get<DestinationConfigEntry[]>(
+    const response = await axios.get<ApiResponse<DestinationConfigEntry[]>>(
       `${API_BASE_URL}/api/destinations`
     );
-    return response.data;
+    return extractData(response.data);
   },
 
   getDestination: async (name: string): Promise<DestinationConfigEntry> => {
-    const response = await axios.get<DestinationConfigEntry>(
+    const response = await axios.get<ApiResponse<DestinationConfigEntry>>(
       `${API_BASE_URL}/api/destinations/${name}`
     );
-    return response.data;
+    return extractData(response.data);
   },
 
   createDestination: async (
     destination: DestinationConfigEntry
   ): Promise<void> => {
-    await axios.post(`${API_BASE_URL}/api/destinations`, destination);
+    const response = await axios.post<ApiResponse<void>>(
+      `${API_BASE_URL}/api/destinations`,
+      destination
+    );
+    checkSuccess(response.data);
   },
 
   updateDestination: async (
     name: string,
     destination: DestinationConfigEntry
   ): Promise<void> => {
-    await axios.put(`${API_BASE_URL}/api/destinations/${name}`, destination);
+    const response = await axios.put<ApiResponse<void>>(
+      `${API_BASE_URL}/api/destinations/${name}`,
+      destination
+    );
+    checkSuccess(response.data);
   },
 
   deleteDestination: async (name: string): Promise<void> => {
-    await axios.delete(`${API_BASE_URL}/api/destinations/${name}`);
+    const response = await axios.delete<ApiResponse<void>>(
+      `${API_BASE_URL}/api/destinations/${name}`
+    );
+    checkSuccess(response.data);
   },
 
   testDestination: async (name: string): Promise<string> => {
-    const response = await axios.post(
+    const response = await axios.post<ApiResponse<void>>(
       `${API_BASE_URL}/api/destinations/${name}/test`
     );
-    return response.data;
+    checkSuccess(response.data);
+    return response.data.message;
   },
 
   testDestinationConfig: async (
     config: DestinationConfigEntry
   ): Promise<string> => {
-    const response = await axios.post(
+    const response = await axios.post<ApiResponse<void>>(
       `${API_BASE_URL}/api/destinations/test-config`,
       config
     );
-    return response.data;
+    checkSuccess(response.data);
+    return response.data.message;
   },
 
   // Flows
   listFlows: async (): Promise<FlowConfigEntry[]> => {
-    const response = await axios.get<FlowConfigEntry[]>(
+    const response = await axios.get<ApiResponse<FlowConfigEntry[]>>(
       `${API_BASE_URL}/api/flows`
     );
-    return response.data;
+    return extractData(response.data);
   },
 
   getFlow: async (name: string): Promise<FlowConfigEntry> => {
-    const response = await axios.get<FlowConfigEntry>(
+    const response = await axios.get<ApiResponse<FlowConfigEntry>>(
       `${API_BASE_URL}/api/flows/${name}`
     );
-    return response.data;
+    return extractData(response.data);
   },
 
   createFlow: async (flow: FlowConfigEntry): Promise<void> => {
-    await axios.post(`${API_BASE_URL}/api/flows`, flow);
+    const response = await axios.post<ApiResponse<void>>(
+      `${API_BASE_URL}/api/flows`,
+      flow
+    );
+    checkSuccess(response.data);
   },
 
   deleteFlow: async (name: string): Promise<void> => {
-    await axios.delete(`${API_BASE_URL}/api/flows/${name}`);
+    const response = await axios.delete<ApiResponse<void>>(
+      `${API_BASE_URL}/api/flows/${name}`
+    );
+    checkSuccess(response.data);
   },
 
   startFlow: async (name: string): Promise<void> => {
-    await axios.put(`${API_BASE_URL}/api/flows/${name}/start`);
+    const response = await axios.put<ApiResponse<void>>(
+      `${API_BASE_URL}/api/flows/${name}/start`
+    );
+    checkSuccess(response.data);
   },
 
   stopFlow: async (name: string): Promise<void> => {
-    await axios.put(`${API_BASE_URL}/api/flows/${name}/stop`);
+    const response = await axios.put<ApiResponse<void>>(
+      `${API_BASE_URL}/api/flows/${name}/stop`
+    );
+    checkSuccess(response.data);
   },
 };

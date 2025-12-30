@@ -1,12 +1,11 @@
 use axum::{
     extract::{Path, State},
-    http::StatusCode,
     response::IntoResponse,
     Json,
 };
 use cdc_config_store::ConnectorConfigEntry;
 
-use crate::handlers::AppState;
+use crate::{handlers::AppState, ApiResponse};
 
 pub async fn list_connectors(State(state): State<AppState>) -> impl IntoResponse {
     let store = state.config_store.read().await;
@@ -15,119 +14,115 @@ pub async fn list_connectors(State(state): State<AppState>) -> impl IntoResponse
         .await
         .into_iter()
         .collect::<Vec<_>>();
-    Json(connectors)
+    ApiResponse::success(connectors, "Connectors retrieved successfully")
 }
 
 pub async fn get_connector(
     State(state): State<AppState>,
     Path(name): Path<String>,
-) -> Result<impl IntoResponse, StatusCode> {
+) -> impl IntoResponse {
     let store = state.config_store.read().await;
 
-    match store.get_connector(&name).await {
-        Some(connector) => Ok(Json(connector)),
-        None => Err(StatusCode::NOT_FOUND),
-    }
+    let connector = match store.get_connector(&name).await {
+        Some(c) => c,
+        None => return ApiResponse::not_found("Connector"),
+    };
+
+    ApiResponse::success(connector, "Connector retrieved successfully")
 }
 
 pub async fn create_connector(
     State(state): State<AppState>,
     Json(entry): Json<ConnectorConfigEntry>,
-) -> Result<impl IntoResponse, StatusCode> {
+) -> ApiResponse<()> {
     let mut store = state.config_store.write().await;
 
-    store
-        .add_connector(entry)
-        .await
-        .map_err(|_| StatusCode::BAD_REQUEST)?;
-
-    Ok(StatusCode::CREATED)
+    match store.add_connector(entry).await {
+        Ok(_) => ApiResponse::<()>::success_no_data("Connector created successfully"),
+        Err(e) => ApiResponse::<()>::bad_request(format!("Failed to create connector: {}", e)),
+    }
 }
 
 pub async fn update_connector(
     State(state): State<AppState>,
     Path(name): Path<String>,
     Json(entry): Json<ConnectorConfigEntry>,
-) -> Result<impl IntoResponse, StatusCode> {
+) -> ApiResponse<()> {
     let mut store = state.config_store.write().await;
 
-    store
-        .update_connector(&name, entry)
-        .await
-        .map_err(|_| StatusCode::NOT_FOUND)?;
-
-    Ok(StatusCode::OK)
+    match store.update_connector(&name, entry).await {
+        Ok(_) => ApiResponse::<()>::success_no_data("Connector updated successfully"),
+        Err(_) => ApiResponse::<()>::not_found("Connector"),
+    }
 }
 
 pub async fn delete_connector(
     State(state): State<AppState>,
     Path(name): Path<String>,
-) -> Result<impl IntoResponse, StatusCode> {
+) -> ApiResponse<()> {
     let mut store = state.config_store.write().await;
 
-    store
-        .delete_connector(&name)
-        .await
-        .map_err(|_| StatusCode::CONFLICT)?;
-
-    Ok(StatusCode::NO_CONTENT)
+    match store.delete_connector(&name).await {
+        Ok(_) => ApiResponse::<()>::success_no_data("Connector deleted successfully"),
+        Err(e) => ApiResponse::<()>::conflict(format!("Failed to delete connector: {}", e)),
+    }
 }
 
 pub async fn test_connector(
     State(state): State<AppState>,
     Path(name): Path<String>,
-) -> Result<impl IntoResponse, StatusCode> {
+) -> impl IntoResponse {
     let store = state.config_store.read().await;
 
-    let connector_entry = store
-        .get_connector(&name)
-        .await
-        .ok_or(StatusCode::NOT_FOUND)?;
+    let connector_entry = match store.get_connector(&name).await {
+        Some(entry) => entry,
+        None => return ApiResponse::not_found("Connector"),
+    };
 
     // Get registry to create connector
     let registry = &state.registry;
-    let connector_factory = registry
-        .get_connector_factory(&connector_entry.connector_type)
-        .map_err(|_| StatusCode::BAD_REQUEST)?;
+    let connector_factory = match registry.get_connector_factory(&connector_entry.connector_type) {
+        Ok(factory) => factory,
+        Err(_) => return ApiResponse::bad_request("Invalid connector type"),
+    };
 
-    let mut connector = connector_factory
-        .create(connector_entry.config.clone())
-        .map_err(|_| StatusCode::BAD_REQUEST)?;
+    let mut connector = match connector_factory.create(connector_entry.config.clone()) {
+        Ok(conn) => conn,
+        Err(e) => return ApiResponse::bad_request(format!("Failed to create connector: {}", e)),
+    };
 
     // Try to connect
     match connector.connect().await {
         Ok(_) => {
             connector.disconnect().await.ok();
-            Ok((StatusCode::OK, "Connection successful").into_response())
+            ApiResponse::<()>::success_no_data("Connection successful")
         }
-        Err(e) => {
-            Ok((StatusCode::BAD_REQUEST, format!("Connection failed: {}", e)).into_response())
-        }
+        Err(e) => ApiResponse::bad_request(format!("Connection failed: {}", e)),
     }
 }
 
 pub async fn test_connector_config(
     State(state): State<AppState>,
     Json(entry): Json<ConnectorConfigEntry>,
-) -> Result<impl IntoResponse, StatusCode> {
+) -> impl IntoResponse {
     // Get registry to create connector
     let registry = &state.registry;
-    let connector_factory = registry
-        .get_connector_factory(&entry.connector_type)
-        .map_err(|_| StatusCode::BAD_REQUEST)?;
+    let connector_factory = match registry.get_connector_factory(&entry.connector_type) {
+        Ok(factory) => factory,
+        Err(_) => return ApiResponse::bad_request("Invalid connector type"),
+    };
 
-    let mut connector = connector_factory
-        .create(entry.config.clone())
-        .map_err(|_| StatusCode::BAD_REQUEST)?;
+    let mut connector = match connector_factory.create(entry.config.clone()) {
+        Ok(conn) => conn,
+        Err(e) => return ApiResponse::bad_request(format!("Failed to create connector: {}", e)),
+    };
 
     // Try to connect
     match connector.connect().await {
         Ok(_) => {
             connector.disconnect().await.ok();
-            Ok((StatusCode::OK, "Connection successful").into_response())
+            ApiResponse::<()>::success_no_data("Connection successful")
         }
-        Err(e) => {
-            Ok((StatusCode::BAD_REQUEST, format!("Connection failed: {}", e)).into_response())
-        }
+        Err(e) => ApiResponse::bad_request(format!("Connection failed: {}", e)),
     }
 }
