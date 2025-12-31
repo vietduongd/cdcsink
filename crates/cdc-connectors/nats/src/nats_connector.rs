@@ -1,9 +1,10 @@
+use async_nats::jetstream::{self, consumer::PullConsumer};
 use async_nats::{Client, Subscriber};
 use async_trait::async_trait;
 use cdc_core::{Connector, ConnectorStatus, DataRecord, Error, Result};
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
-use tracing::{debug, error, info};
+use tracing::info;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NatsConfig {
@@ -92,7 +93,8 @@ impl Connector for NatsConnector {
             .map_err(|e| Error::Connection(format!("Failed to connect to NATS: {}", e)))?;
 
         info!("Connected to NATS successfully");
-
+        let jetstreams = jetstream::new(client);
+        
         // Subscribe to subject
         let subscriber = if let Some(ref group) = self.config.consumer_group {
             info!(
@@ -147,10 +149,10 @@ impl Connector for NatsConnector {
             .subscriber
             .as_mut()
             .ok_or_else(|| Error::Connection("Not connected".to_string()))?;
-
+        info!("NATS run waiting value");
         match subscriber.next().await {
             Some(msg) => {
-                debug!("Received message from NATS: {} bytes", msg.payload.len());
+                info!("Received message from NATS: {} bytes", msg.payload.len());
 
                 match serde_json::from_slice::<DataRecord>(&msg.payload) {
                     Ok(record) => {
