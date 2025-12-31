@@ -1,3 +1,4 @@
+use async_nats::jetstream::consumer::{self, Config, Consumer};
 use async_nats::jetstream::{self, consumer::PullConsumer};
 use async_nats::{Client, Subscriber};
 use async_trait::async_trait;
@@ -55,6 +56,7 @@ pub struct NatsConnector {
     config: NatsConfig,
     client: Option<Client>,
     subscriber: Option<Subscriber>,
+    consumer: Option<Consumer<Config>>,
     status: ConnectorStatus,
 }
 
@@ -65,6 +67,7 @@ impl NatsConnector {
             client: None,
             subscriber: None,
             status: ConnectorStatus::default(),
+            consumer: None,
         }
     }
 }
@@ -93,28 +96,49 @@ impl Connector for NatsConnector {
             .map_err(|e| Error::Connection(format!("Failed to connect to NATS: {}", e)))?;
 
         info!("Connected to NATS successfully");
-        let jetstreams = jetstream::new(client);
-        
-        // Subscribe to subject
-        let subscriber = if let Some(ref group) = self.config.consumer_group {
-            info!(
-                "Subscribing to subject '{}' with consumer group '{}'",
-                self.config.subject, group
-            );
-            client
-                .queue_subscribe(self.config.subject.clone(), group.clone())
-                .await
-                .map_err(|e| Error::Connection(format!("Failed to subscribe: {}", e)))?
+
+        let stream = jetstream
+            .get_or_create_stream(jetstream::stream::Config {
+                name: self.config.consumer_group.unwrap(),
+                subjects: vec![self.config.subject.clone()], // Listen to all 'orders.*' subjects
+                max_messages: 10_000,                        // Limit stream size
+                ..Default::default()
+            })
+            .await?;
+        if (self.config.use_jetstream) {
+            let jetstreams = jetstream::new(client);
+            let consumer = jetstreams
+                .create_consumer_strict_on_stream(
+                    jetstream::consumer::Config {
+                        name: self.config.consumer_name.clone(),
+                        ..Default::default()
+                    },
+                    stream,
+                )
+                .await?;
+            self.consumer = Some(consumer);
         } else {
-            info!("Subscribing to subject '{}'", self.config.subject);
-            client
-                .subscribe(self.config.subject.clone())
-                .await
-                .map_err(|e| Error::Connection(format!("Failed to subscribe: {}", e)))?
-        };
+            // Subscribe to subject
+            let subscriber = if let Some(ref group) = self.config.consumer_group {
+                info!(
+                    "Subscribing to subject '{}' with consumer group '{}'",
+                    self.config.subject, group
+                );
+                client
+                    .queue_subscribe(self.config.subject.clone(), group.clone())
+                    .await
+                    .map_err(|e| Error::Connection(format!("Failed to subscribe: {}", e)))?
+            } else {
+                info!("Subscribing to subject '{}'", self.config.subject);
+                client
+                    .subscribe(self.config.subject.clone())
+                    .await
+                    .map_err(|e| Error::Connection(format!("Failed to subscribe: {}", e)))?
+            };
+            self.subscriber = Some(subscriber);
+        }
 
         self.client = Some(client);
-        self.subscriber = Some(subscriber);
         self.status.connected = true;
 
         Ok(())
@@ -150,27 +174,42 @@ impl Connector for NatsConnector {
             .as_mut()
             .ok_or_else(|| Error::Connection("Not connected".to_string()))?;
         info!("NATS run waiting value");
-        match subscriber.next().await {
-            Some(msg) => {
+        if self.config.use_jetstream {
+            let mut messages = self.consumer.messages().await?.take(10);
+            while let Some(msg) = messages.next().await {
                 info!("Received message from NATS: {} bytes", msg.payload.len());
+                let message = message?;
+                println!(
+                    "got message on subject {} with payload {:?}",
+                    message.subject,
+                    from_utf8(&message.payload)?
+                );
+                message.ack().await?;
+            }
+            Ok(None)
+        } else {
+            match subscriber.next().await {
+                Some(msg) => {
+                    info!("Received message from NATS: {} bytes", msg.payload.len());
 
-                match serde_json::from_slice::<DataRecord>(&msg.payload) {
-                    Ok(record) => {
-                        self.status.records_received += 1;
-                        Ok(Some(record))
-                    }
-                    Err(e) => {
-                        self.status.errors += 1;
-                        let err_msg = format!("Failed to deserialize message: {}", e);
-                        self.status.last_error = Some(err_msg.clone());
-                        error!("{}", err_msg);
-                        Err(Error::Serialization(e))
+                    match serde_json::from_slice::<DataRecord>(&msg.payload) {
+                        Ok(record) => {
+                            self.status.records_received += 1;
+                            Ok(Some(record))
+                        }
+                        Err(e) => {
+                            self.status.errors += 1;
+                            let err_msg = format!("Failed to deserialize message: {}", e);
+                            self.status.last_error = Some(err_msg.clone());
+                            error!("{}", err_msg);
+                            Err(Error::Serialization(e))
+                        }
                     }
                 }
-            }
-            None => {
-                info!("NATS subscription closed");
-                Ok(None)
+                None => {
+                    info!("NATS subscription closed");
+                    Ok(None)
+                }
             }
         }
     }
