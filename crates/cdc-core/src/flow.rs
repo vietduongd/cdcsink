@@ -3,8 +3,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::{mpsc, Mutex, RwLock};
 use tokio::task::JoinHandle;
+use tokio::time::sleep;
 use tracing::{error, info, warn};
 
 /// Configuration structures for flows
@@ -62,6 +64,7 @@ impl Default for ConnectorConfig {
                 "servers": ["nats://localhost:4222"],
                 "subject": "cdc.events",
                 "consumer_group": null,
+                "consumer_name": null,
                 "use_jetstream": false
             }),
         }
@@ -211,6 +214,7 @@ impl Flow {
                     // Continue processing other records
                 }
             }
+            sleep(Duration::from_secs(2)).await;
         }
 
         // Flush remaining records

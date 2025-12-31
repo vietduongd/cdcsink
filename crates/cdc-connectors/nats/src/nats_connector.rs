@@ -1,11 +1,12 @@
-use async_nats::jetstream::consumer::{self, Config, Consumer};
-use async_nats::jetstream::{self, consumer::PullConsumer};
-use async_nats::{Client, Subscriber};
+use std::str::from_utf8;
+
+use async_nats::jetstream::consumer::PullConsumer;
+use async_nats::{jetstream, Client, Subscriber};
 use async_trait::async_trait;
 use cdc_core::{Connector, ConnectorStatus, DataRecord, Error, Result};
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
-use tracing::info;
+use tracing::{error, info};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NatsConfig {
@@ -56,7 +57,7 @@ pub struct NatsConnector {
     config: NatsConfig,
     client: Option<Client>,
     subscriber: Option<Subscriber>,
-    consumer: Option<Consumer<Config>>,
+    consumer: Option<PullConsumer>,
     status: ConnectorStatus,
 }
 
@@ -97,25 +98,28 @@ impl Connector for NatsConnector {
 
         info!("Connected to NATS successfully");
 
-        let stream = jetstream
-            .get_or_create_stream(jetstream::stream::Config {
-                name: self.config.consumer_group.unwrap(),
-                subjects: vec![self.config.subject.clone()], // Listen to all 'orders.*' subjects
-                max_messages: 10_000,                        // Limit stream size
-                ..Default::default()
-            })
-            .await?;
-        if (self.config.use_jetstream) {
-            let jetstreams = jetstream::new(client);
-            let consumer = jetstreams
-                .create_consumer_strict_on_stream(
-                    jetstream::consumer::Config {
-                        name: self.config.consumer_name.clone(),
-                        ..Default::default()
-                    },
-                    stream,
-                )
-                .await?;
+        if self.config.use_jetstream {
+            let jetstreams = jetstream::new(client.clone());
+            let consumer_group = self.config.consumer_group.clone().unwrap_or_default();
+            let stream = jetstreams
+                .get_or_create_stream(jetstream::stream::Config {
+                    name: consumer_group,
+                    subjects: vec![self.config.subject.clone()], // Listen to all 'orders.*' subjects
+                    max_messages: 10_000,                        // Limit stream size
+                    ..Default::default()
+                })
+                .await
+                .map_err(|e| Error::Connection(format!("Failed to create stream: {}", e)))?;
+            let consumer_same = self.config.consumer_name.clone().unwrap_or_default();
+            info!("Stream created successfully with : {}", consumer_same);
+            let consumer: PullConsumer = stream
+                .create_consumer(jetstream::consumer::pull::Config {
+                    durable_name: self.config.consumer_name.clone(),
+                    ..Default::default()
+                })
+                .await
+                .map_err(|e| Error::Connection(format!("Failed to create consumer: {}", e)))?;
+
             self.consumer = Some(consumer);
         } else {
             // Subscribe to subject
@@ -169,28 +173,61 @@ impl Connector for NatsConnector {
     }
 
     async fn receive(&mut self) -> Result<Option<DataRecord>> {
-        let subscriber = self
-            .subscriber
-            .as_mut()
-            .ok_or_else(|| Error::Connection("Not connected".to_string()))?;
         info!("NATS run waiting value");
         if self.config.use_jetstream {
-            let mut messages = self.consumer.messages().await?.take(10);
+            let consumer_info = self
+                .consumer
+                .as_mut()
+                .ok_or_else(|| Error::Connection(" consumer_info is not connected".to_string()))?;
+
+            let consumer_name = consumer_info.info().await.unwrap();
+            info!(
+                "Consumer name: {}",
+                consumer_name
+                    .config
+                    .durable_name
+                    .as_deref()
+                    .unwrap_or("None")
+            );
+
+            let mut messages = consumer_info
+                .messages()
+                .await
+                .map_err(|e| Error::Connection(format!("Failed to get messages: {}", e)))?;
+
             while let Some(msg) = messages.next().await {
+                let msg = msg
+                    .map_err(|e| Error::Connection(format!("Failed to receive message: {}", e)))?;
                 info!("Received message from NATS: {} bytes", msg.payload.len());
-                let message = message?;
+
+                let payload_str = from_utf8(&msg.payload).map_err(|e| {
+                    Error::Io(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("Invalid UTF-8: {}", e),
+                    ))
+                })?;
+
                 println!(
                     "got message on subject {} with payload {:?}",
-                    message.subject,
-                    from_utf8(&message.payload)?
+                    msg.subject, payload_str
                 );
-                message.ack().await?;
+
+                msg.ack().await.map_err(|e| {
+                    Error::Connection(format!("Failed to acknowledge message: {}", e))
+                })?;
             }
             Ok(None)
         } else {
+            let subscriber = self
+                .subscriber
+                .as_mut()
+                .ok_or_else(|| Error::Connection("Not connected".to_string()))?;
             match subscriber.next().await {
                 Some(msg) => {
-                    info!("Received message from NATS: {} bytes", msg.payload.len());
+                    info!(
+                        "Received message from NATS: {} bytes, by",
+                        msg.payload.len()
+                    );
 
                     match serde_json::from_slice::<DataRecord>(&msg.payload) {
                         Ok(record) => {

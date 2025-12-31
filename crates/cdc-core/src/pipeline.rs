@@ -1,5 +1,8 @@
-use crate::{Connector, Destination, DataRecord, Result};
-use tracing::{info, error, warn};
+use std::time::Duration;
+
+use crate::{Connector, DataRecord, Destination, Result};
+use tokio::time::sleep;
+use tracing::{error, info, warn};
 
 /// Main pipeline orchestrating data flow from connector to destination
 pub struct Pipeline {
@@ -22,22 +25,22 @@ impl Pipeline {
             buffer: Vec::with_capacity(batch_size),
         }
     }
-    
+
     /// Start the pipeline
     pub async fn run(&mut self) -> Result<()> {
         info!("Starting CDC pipeline");
-        
+
         // Connect to source and destination
         self.connector.connect().await?;
         self.destination.connect().await?;
-        
+
         info!("Pipeline connected successfully");
-        
+
         loop {
             match self.connector.receive().await {
                 Ok(Some(record)) => {
                     self.buffer.push(record);
-                    
+
                     if self.buffer.len() >= self.batch_size {
                         self.flush().await?;
                     }
@@ -47,33 +50,34 @@ impl Pipeline {
                     break;
                 }
                 Err(e) => {
-                    error!("Error receiving record: {}", e);
+                    error!("Error receiving record 1: {}", e);
                     // Continue processing other records
                 }
             }
+            sleep(Duration::from_secs(2)).await;
         }
-        
+
         // Flush remaining records
         if !self.buffer.is_empty() {
             self.flush().await?;
         }
-        
+
         // Disconnect
         self.connector.disconnect().await?;
         self.destination.disconnect().await?;
-        
+
         info!("Pipeline stopped");
         Ok(())
     }
-    
+
     async fn flush(&mut self) -> Result<()> {
         if self.buffer.is_empty() {
             return Ok(());
         }
-        
+
         let records = std::mem::take(&mut self.buffer);
         let count = records.len();
-        
+
         match self.destination.write_batch(records).await {
             Ok(_) => {
                 info!("Flushed {} records to destination", count);
@@ -85,7 +89,7 @@ impl Pipeline {
             }
         }
     }
-    
+
     pub fn get_status(&self) -> PipelineStatus {
         PipelineStatus {
             connector_status: self.connector.status(),

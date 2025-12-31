@@ -37,7 +37,7 @@ impl Default for AppConfig {
         Self {
             flows: vec![FlowConfig::default()],
             api: ApiConfig {
-                host: "0.0.0.0".to_string(),
+                host: "localhost".to_string(),
                 port: 3000,
                 cors_enabled: true,
             },

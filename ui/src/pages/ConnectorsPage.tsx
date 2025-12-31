@@ -444,6 +444,20 @@ const ConnectorForm: React.FC<{
                       placeholder="Optional"
                     />
                   </div>
+                  <div className="space-y-2">
+                    <label className="text-[10px] font-bold text-slate-500 uppercase">
+                      Consumer Name
+                    </label>
+                    <input
+                      type="text"
+                      className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-md text-xs font-bold focus:outline-none focus:border-indigo-400"
+                      value={config.consumer_name || ""}
+                      onChange={(e) =>
+                        updateConfig("consumer_name", e.target.value)
+                      }
+                      placeholder="Optional (durable name for JetStream)"
+                    />
+                  </div>
                   <div className="flex items-center gap-3 pt-2">
                     <input
                       type="checkbox"
