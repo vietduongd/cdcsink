@@ -206,8 +206,9 @@ impl Flow {
                     }
                 }
                 Ok(None) => {
-                    warn!("[{}] Connector stream closed", self.name);
-                    break;
+                    // No messages available right now, continue waiting
+                    // Note: Don't break here! Ok(None) means "no data right now"
+                    // not "stream closed". The connector will keep trying.
                 }
                 Err(e) => {
                     error!("[{}] Error receiving record: {}", self.name, e);
@@ -269,6 +270,8 @@ pub struct FlowHandle {
     pub control_tx: mpsc::Sender<FlowCommand>,
     pub task_handle: JoinHandle<Result<()>>,
     pub status: Arc<RwLock<FlowStatus>>,
+    pub start_time: std::time::Instant,
+    pub records_processed: Arc<RwLock<u64>>,
 }
 
 /// Flow builder for creating flows from configuration references
@@ -353,6 +356,8 @@ impl FlowOrchestrator {
             control_tx: tx,
             task_handle,
             status,
+            start_time: std::time::Instant::now(),
+            records_processed: Arc::new(RwLock::new(0)),
         };
 
         flows.insert(name.clone(), handle);
@@ -415,6 +420,18 @@ impl FlowOrchestrator {
             Some(handle.status.read().await.clone())
         } else {
             None
+        }
+    }
+
+    /// Get flow metrics (uptime and records processed)
+    pub async fn get_flow_metrics(&self, name: &str) -> (Option<u64>, Option<u64>) {
+        let flows = self.flows.lock().await;
+        if let Some(handle) = flows.get(name) {
+            let uptime_seconds = Some(handle.start_time.elapsed().as_secs());
+            let records_processed = Some(*handle.records_processed.read().await);
+            (uptime_seconds, records_processed)
+        } else {
+            (None, None)
         }
     }
 

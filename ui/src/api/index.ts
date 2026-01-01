@@ -74,6 +74,8 @@ export interface FlowConfigEntry {
   description?: string;
   created_at?: string;
   updated_at?: string;
+  uptime_seconds?: number;
+  records_processed?: number;
 }
 
 export const api = {
@@ -260,6 +262,27 @@ export const api = {
   stopFlow: async (name: string): Promise<void> => {
     const response = await axios.put<ApiResponse<void>>(
       `${API_BASE_URL}/api/flows/${name}/stop`
+    );
+    checkSuccess(response.data);
+  },
+
+  restartFlow: async (name: string): Promise<void> => {
+    const response = await axios.put<ApiResponse<void>>(
+      `${API_BASE_URL}/api/flows/${name}/restart`
+    );
+    checkSuccess(response.data);
+  },
+
+  pauseFlow: async (name: string): Promise<void> => {
+    const response = await axios.put<ApiResponse<void>>(
+      `${API_BASE_URL}/api/flows/${name}/pause`
+    );
+    checkSuccess(response.data);
+  },
+
+  resumeFlow: async (name: string): Promise<void> => {
+    const response = await axios.put<ApiResponse<void>>(
+      `${API_BASE_URL}/api/flows/${name}/resume`
     );
     checkSuccess(response.data);
   },

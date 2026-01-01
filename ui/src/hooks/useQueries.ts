@@ -199,5 +199,46 @@ export const useFlowMutations = () => {
     },
   });
 
-  return { createMutation, deleteMutation, startMutation, stopMutation };
+  const restartMutation = useMutation({
+    mutationFn: api.restartFlow,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["flows"] });
+      toast.success("Flow restarted successfully");
+    },
+    onError: (error: Error) => {
+      toast.error(error.message || "Failed to restart flow");
+    },
+  });
+
+  const pauseMutation = useMutation({
+    mutationFn: api.pauseFlow,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["flows"] });
+      toast.success("Flow paused successfully");
+    },
+    onError: (error: Error) => {
+      toast.error(error.message || "Failed to pause flow");
+    },
+  });
+
+  const resumeMutation = useMutation({
+    mutationFn: api.resumeFlow,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["flows"] });
+      toast.success("Flow resumed successfully");
+    },
+    onError: (error: Error) => {
+      toast.error(error.message || "Failed to resume flow");
+    },
+  });
+
+  return {
+    createMutation,
+    deleteMutation,
+    startMutation,
+    stopMutation,
+    restartMutation,
+    pauseMutation,
+    resumeMutation,
+  };
 };

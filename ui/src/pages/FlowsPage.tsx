@@ -17,6 +17,9 @@ import {
   CheckCircle2,
   Cable,
   Database,
+  RotateCw,
+  Clock,
+  TrendingUp,
 } from "lucide-react";
 
 const getConnectorLogo = (type?: string) => {
@@ -47,11 +50,27 @@ const getDestinationLogo = (type?: string) => {
   }
 };
 
+// Format uptime in seconds to human-readable format
+const formatUptime = (seconds: number): string => {
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  const secs = seconds % 60;
+
+  if (hours > 0) {
+    return `${hours}h ${minutes}m`;
+  } else if (minutes > 0) {
+    return `${minutes}m ${secs}s`;
+  } else {
+    return `${secs}s`;
+  }
+};
+
 export const FlowsPage: React.FC = () => {
   const { data: flows, isLoading } = useFlows();
   const { data: connectors } = useConnectors();
   const { data: destinations } = useDestinations();
-  const { deleteMutation, startMutation, stopMutation } = useFlowMutations();
+  const { deleteMutation, startMutation, stopMutation, restartMutation } =
+    useFlowMutations();
   const [isFormOpen, setIsFormOpen] = useState(false);
 
   const connectorMap = React.useMemo(() => {
@@ -143,13 +162,32 @@ export const FlowsPage: React.FC = () => {
 
                 <div className="flex gap-2">
                   {flow.active ? (
-                    <button
-                      className="p-2 text-amber-600 hover:bg-amber-50 rounded transition-colors"
-                      title="Stop Flow"
-                      onClick={() => stopMutation.mutate(flow.name.toString())}
-                    >
-                      <Square size={16} fill="currentColor" />
-                    </button>
+                    <>
+                      <button
+                        className="p-2 text-blue-600 hover:bg-blue-50 rounded transition-colors"
+                        title="Restart Flow"
+                        onClick={() =>
+                          restartMutation.mutate(flow.name.toString())
+                        }
+                        disabled={restartMutation.isPending}
+                      >
+                        <RotateCw
+                          size={16}
+                          className={
+                            restartMutation.isPending ? "animate-spin" : ""
+                          }
+                        />
+                      </button>
+                      <button
+                        className="p-2 text-amber-600 hover:bg-amber-50 rounded transition-colors"
+                        title="Stop Flow"
+                        onClick={() =>
+                          stopMutation.mutate(flow.name.toString())
+                        }
+                      >
+                        <Square size={16} fill="currentColor" />
+                      </button>
+                    </>
                   ) : (
                     <button
                       className="p-2 text-emerald-600 hover:bg-emerald-50 rounded transition-colors"
@@ -231,29 +269,72 @@ export const FlowsPage: React.FC = () => {
                 </div>
               </div>
 
-              <div className="px-6 py-4 border-t border-slate-100 flex items-center justify-between text-[10px] font-bold">
-                <div className="flex items-center gap-6">
-                  <div className="flex flex-col">
-                    <span className="text-slate-400 uppercase tracking-widest">
-                      Batch Size
-                    </span>
-                    <span className="text-slate-800 uppercase">
-                      {flow.batch_size} events
-                    </span>
+              <div className="px-6 py-4 border-t border-slate-100">
+                <div className="flex items-center justify-between text-[10px] font-bold mb-3">
+                  <div className="flex items-center gap-6">
+                    <div className="flex flex-col">
+                      <span className="text-slate-400 uppercase tracking-widest">
+                        Batch Size
+                      </span>
+                      <span className="text-slate-800 uppercase">
+                        {flow.batch_size} events
+                      </span>
+                    </div>
+                    <div className="flex flex-col">
+                      <span className="text-slate-400 uppercase tracking-widest">
+                        Auto Start
+                      </span>
+                      <span className="text-slate-800 uppercase">
+                        {flow.auto_start ? "Enabled" : "Disabled"}
+                      </span>
+                    </div>
                   </div>
-                  <div className="flex flex-col">
-                    <span className="text-slate-400 uppercase tracking-widest">
-                      Auto Start
-                    </span>
-                    <span className="text-slate-800 uppercase">
-                      {flow.auto_start ? "Enabled" : "Disabled"}
-                    </span>
-                  </div>
+                  <button className="flex items-center gap-1.5 text-indigo-600 hover:text-indigo-700">
+                    <Info size={14} />
+                    Logs
+                  </button>
                 </div>
-                <button className="flex items-center gap-1.5 text-indigo-600 hover:text-indigo-700">
-                  <Info size={14} />
-                  Logs
-                </button>
+
+                {/* Metrics Display */}
+                {flow.active &&
+                  (flow.uptime_seconds !== undefined ||
+                    flow.records_processed !== undefined) && (
+                    <div className="flex items-center gap-4 pt-3 border-t border-slate-100">
+                      {flow.uptime_seconds !== undefined && (
+                        <div className="flex items-center gap-2">
+                          <div className="p-1.5 bg-blue-50 rounded">
+                            <Clock size={12} className="text-blue-600" />
+                          </div>
+                          <div className="flex flex-col">
+                            <span className="text-[9px] text-slate-400 uppercase tracking-widest">
+                              Uptime
+                            </span>
+                            <span className="text-xs font-bold text-slate-800">
+                              {formatUptime(flow.uptime_seconds)}
+                            </span>
+                          </div>
+                        </div>
+                      )}
+                      {flow.records_processed !== undefined && (
+                        <div className="flex items-center gap-2">
+                          <div className="p-1.5 bg-emerald-50 rounded">
+                            <TrendingUp
+                              size={12}
+                              className="text-emerald-600"
+                            />
+                          </div>
+                          <div className="flex flex-col">
+                            <span className="text-[9px] text-slate-400 uppercase tracking-widest">
+                              Records
+                            </span>
+                            <span className="text-xs font-bold text-slate-800">
+                              {flow.records_processed.toLocaleString()}
+                            </span>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
               </div>
             </div>
           );

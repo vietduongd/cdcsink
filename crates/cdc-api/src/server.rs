@@ -80,6 +80,9 @@ impl ApiServer {
             )
             .route("/api/flows/{name}/start", put(flows::start_flow))
             .route("/api/flows/{name}/stop", put(flows::stop_flow))
+            .route("/api/flows/{name}/restart", put(flows::restart_flow))
+            .route("/api/flows/{name}/pause", put(flows::pause_flow))
+            .route("/api/flows/{name}/resume", put(flows::resume_flow))
             .with_state(self.state);
 
         if self.cors_enabled {

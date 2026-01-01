@@ -1,5 +1,6 @@
 use std::str::from_utf8;
 
+use async_nats::jetstream::consumer::pull::Stream;
 use async_nats::jetstream::consumer::PullConsumer;
 use async_nats::{jetstream, Client, Subscriber};
 use async_trait::async_trait;
@@ -58,6 +59,7 @@ pub struct NatsConnector {
     client: Option<Client>,
     subscriber: Option<Subscriber>,
     consumer: Option<PullConsumer>,
+    message_stream: Option<Stream>,
     status: ConnectorStatus,
 }
 
@@ -69,6 +71,7 @@ impl NatsConnector {
             subscriber: None,
             status: ConnectorStatus::default(),
             consumer: None,
+            message_stream: None,
         }
     }
 }
@@ -119,7 +122,11 @@ impl Connector for NatsConnector {
                 })
                 .await
                 .map_err(|e| Error::Connection(format!("Failed to create consumer: {}", e)))?;
-
+            let messages = consumer
+                .messages()
+                .await
+                .map_err(|e| Error::Connection(format!("Failed to get messages: {}", e)))?;
+            self.message_stream = Some(messages);
             self.consumer = Some(consumer);
         } else {
             // Subscribe to subject
@@ -173,33 +180,20 @@ impl Connector for NatsConnector {
     }
 
     async fn receive(&mut self) -> Result<Option<DataRecord>> {
-        info!("NATS run waiting value");
         if self.config.use_jetstream {
-            let consumer_info = self
-                .consumer
+            let messages = self
+                .message_stream
                 .as_mut()
-                .ok_or_else(|| Error::Connection(" consumer_info is not connected".to_string()))?;
+                .ok_or_else(|| Error::Connection("consumer_info is not connected".to_string()))?;
 
-            let consumer_name = consumer_info.info().await.unwrap();
-            info!(
-                "Consumer name: {}",
-                consumer_name
-                    .config
-                    .durable_name
-                    .as_deref()
-                    .unwrap_or("None")
-            );
-
-            let mut messages = consumer_info
-                .messages()
-                .await
-                .map_err(|e| Error::Connection(format!("Failed to get messages: {}", e)))?;
-
-            while let Some(msg) = messages.next().await {
-                let msg = msg
+            // Get next message from stream
+            if let Some(msg_result) = messages.next().await {
+                let msg = msg_result
                     .map_err(|e| Error::Connection(format!("Failed to receive message: {}", e)))?;
+
                 info!("Received message from NATS: {} bytes", msg.payload.len());
 
+                // Convert payload to UTF-8 string
                 let payload_str = from_utf8(&msg.payload).map_err(|e| {
                     Error::Io(std::io::Error::new(
                         std::io::ErrorKind::InvalidData,
@@ -207,15 +201,36 @@ impl Connector for NatsConnector {
                     ))
                 })?;
 
-                println!(
-                    "got message on subject {} with payload {:?}",
-                    msg.subject, payload_str
-                );
+                info!("Payload: {}", payload_str);
 
+                // Parse JSON payload into DataRecord
+                let record = match serde_json::from_str::<DataRecord>(payload_str) {
+                    Ok(record) => {
+                        info!(
+                            "Successfully parsed DataRecord: table={}, operation={:?}",
+                            record.table, record.operation
+                        );
+                        record
+                    }
+                    Err(e) => {
+                        error!("Failed to deserialize message into DataRecord: {}", e);
+                        // Acknowledge message even if we can't parse it
+                        msg.ack().await.map_err(|e| {
+                            Error::Connection(format!("Failed to acknowledge message: {}", e))
+                        })?;
+                        return Err(Error::Serialization(e));
+                    }
+                };
+
+                // Acknowledge the message
                 msg.ack().await.map_err(|e| {
                     Error::Connection(format!("Failed to acknowledge message: {}", e))
                 })?;
+
+                return Ok(Some(record));
             }
+
+            // No messages available right now
             Ok(None)
         } else {
             let subscriber = self
