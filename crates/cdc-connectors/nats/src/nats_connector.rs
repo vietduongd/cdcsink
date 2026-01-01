@@ -101,6 +101,9 @@ impl Connector for NatsConnector {
 
         info!("Connected to NATS successfully");
 
+        // IMPORTANT: Store client to keep connection alive!
+        self.client = Some(client.clone());
+
         if self.config.use_jetstream {
             let jetstreams = jetstream::new(client.clone());
             let consumer_group = self.config.consumer_group.clone().unwrap_or_default();
