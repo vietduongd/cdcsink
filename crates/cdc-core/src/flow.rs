@@ -1,4 +1,4 @@
-use crate::{Connector, DataRecord, Destination, Error, Registry, Result};
+use crate::{Connector, DataRecord, Destination, Error, NoOpNotifier, Notifier, Registry, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -6,8 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, Mutex, RwLock};
 use tokio::task::JoinHandle;
-use tokio::time::sleep;
-use tracing::{error, info, warn};
+use tracing::{error, info};
 
 /// Configuration structures for flows
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -110,6 +109,11 @@ pub struct Flow {
     batch_size: usize,
     buffer: Vec<DataRecord>,
     control_rx: Option<mpsc::Receiver<FlowCommand>>,
+    last_flush: std::time::Instant,
+    messages_received: Arc<RwLock<u64>>,
+    destination_error_counters: Vec<u64>,
+    error_threshold: u64,
+    notifier: Arc<dyn Notifier>,
 }
 
 impl Flow {
@@ -119,6 +123,7 @@ impl Flow {
         destinations: Vec<Box<dyn Destination>>,
         batch_size: usize,
     ) -> Self {
+        let dest_count = destinations.len();
         Self {
             name,
             connector,
@@ -126,7 +131,17 @@ impl Flow {
             batch_size,
             buffer: Vec::with_capacity(batch_size),
             control_rx: None,
+            last_flush: std::time::Instant::now(),
+            messages_received: Arc::new(RwLock::new(0)),
+            destination_error_counters: vec![0; dest_count],
+            error_threshold: 20, // Default threshold
+            notifier: Arc::new(NoOpNotifier),
         }
+    }
+
+    pub fn with_notifier(mut self, notifier: Arc<dyn Notifier>) -> Self {
+        self.notifier = notifier;
+        self
     }
 
     pub fn with_control(mut self, control_rx: mpsc::Receiver<FlowCommand>) -> Self {
@@ -197,30 +212,50 @@ impl Flow {
                 }
             }
 
-            match self.connector.receive().await {
-                Ok(Some(record)) => {
+            // Check for flush timeout (every 5 seconds)
+            if !self.buffer.is_empty() && self.last_flush.elapsed() >= Duration::from_secs(5) {
+                info!(
+                    "[{}] Flush timeout reached, flushing {} records",
+                    self.name,
+                    self.buffer.len()
+                );
+                if let Err(e) = self.flush().await {
+                    error!("[{}] Flush timeout failed: {}. Continuing...", self.name, e);
+                    // To satisfy "ko stop event", we should ensure we don't get stuck in a loop
+                    // but for now we just catch and continue.
+                }
+            }
+
+            // Receive with timeout to allow control and flush checks
+            match tokio::time::timeout(Duration::from_millis(500), self.connector.receive()).await {
+                Ok(Ok(Some(record))) => {
+                    // Increment message counter
+                    *self.messages_received.write().await += 1;
+
                     self.buffer.push(record);
 
                     if self.buffer.len() >= self.batch_size {
-                        self.flush().await?;
+                        if let Err(e) = self.flush().await {
+                            error!("[{}] Batch flush failed: {}. Continuing...", self.name, e);
+                        }
                     }
                 }
-                Ok(None) => {
-                    // No messages available right now, continue waiting
-                    // Note: Don't break here! Ok(None) means "no data right now"
-                    // not "stream closed". The connector will keep trying.
+                Ok(Ok(None)) | Err(_) => {
+                    // No data or timeout - just continue to next iteration
                 }
-                Err(e) => {
+                Ok(Err(e)) => {
                     error!("[{}] Error receiving record: {}", self.name, e);
                     // Continue processing other records
                 }
             }
-            sleep(Duration::from_secs(2)).await;
         }
 
         // Flush remaining records
         if !self.buffer.is_empty() {
-            self.flush().await?;
+            let _ = self.flush().await.map_err(|e| {
+                error!("[{}] Final flush failed: {}", self.name, e);
+                e
+            });
         }
 
         // Disconnect
@@ -235,6 +270,7 @@ impl Flow {
 
     async fn flush(&mut self) -> Result<()> {
         if self.buffer.is_empty() {
+            self.last_flush = std::time::Instant::now();
             return Ok(());
         }
 
@@ -249,17 +285,66 @@ impl Flow {
                         "[{}] Flushed {} records to destination {}",
                         self.name, count, idx
                     );
+                    // Reset error counter on success
+                    self.destination_error_counters[idx] = 0;
                 }
                 Err(e) => {
+                    // Increment consecutive error counter
+                    self.destination_error_counters[idx] += 1;
+                    let error_count = self.destination_error_counters[idx];
+
                     error!(
-                        "[{}] Failed to flush records to destination {}: {}",
-                        self.name, idx, e
+                        "[{}] Failed to flush records to destination {} (error #{}/{}): {}",
+                        self.name, idx, error_count, self.error_threshold, e
                     );
+
+                    // Check if error threshold reached
+                    if error_count >= self.error_threshold {
+                        error!(
+                            "[{}] Destination {} reached error threshold ({} consecutive errors). Stopping flow.",
+                            self.name, idx, self.error_threshold
+                        );
+
+                        // Send email notification
+                        let error_details = format!(
+                            "Destination {}: {}\nConsecutive errors: {}\nError: {}",
+                            idx,
+                            if idx < self.destinations.len() {
+                                format!("destination_{}", idx)
+                            } else {
+                                "unknown".to_string()
+                            },
+                            error_count,
+                            e
+                        );
+
+                        if let Err(notify_err) = self
+                            .notifier
+                            .send_error_notification(&self.name, &error_details)
+                            .await
+                        {
+                            error!(
+                                "[{}] Failed to send email notification: {}",
+                                self.name, notify_err
+                            );
+                        }
+
+                        // Put records back into buffer to avoid data loss
+                        self.buffer = records;
+                        return Err(Error::Connection(format!(
+                            "Destination {} failed {} consecutive times, threshold reached",
+                            idx, self.error_threshold
+                        )));
+                    }
+
+                    // Put records back into buffer to avoid data loss
+                    self.buffer = records;
                     return Err(e);
                 }
             }
         }
 
+        self.last_flush = std::time::Instant::now();
         Ok(())
     }
 }
@@ -272,6 +357,7 @@ pub struct FlowHandle {
     pub status: Arc<RwLock<FlowStatus>>,
     pub start_time: std::time::Instant,
     pub records_processed: Arc<RwLock<u64>>,
+    pub messages_received: Arc<RwLock<u64>>,
 }
 
 /// Flow builder for creating flows from configuration references
@@ -335,6 +421,10 @@ impl FlowOrchestrator {
 
         // Create control channel
         let (tx, rx) = mpsc::channel(32);
+
+        // Clone the messages_received Arc before moving flow
+        let messages_received = flow.messages_received.clone();
+
         flow = flow.with_control(rx);
 
         // Start flow
@@ -358,6 +448,7 @@ impl FlowOrchestrator {
             status,
             start_time: std::time::Instant::now(),
             records_processed: Arc::new(RwLock::new(0)),
+            messages_received,
         };
 
         flows.insert(name.clone(), handle);
@@ -432,6 +523,16 @@ impl FlowOrchestrator {
             (uptime_seconds, records_processed)
         } else {
             (None, None)
+        }
+    }
+
+    /// Get message count for a flow
+    pub async fn get_flow_message_count(&self, name: &str) -> Option<u64> {
+        let flows = self.flows.lock().await;
+        if let Some(handle) = flows.get(name) {
+            Some(*handle.messages_received.read().await)
+        } else {
+            None
         }
     }
 

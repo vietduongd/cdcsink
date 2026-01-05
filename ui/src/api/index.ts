@@ -76,6 +76,7 @@ export interface FlowConfigEntry {
   updated_at?: string;
   uptime_seconds?: number;
   records_processed?: number;
+  messages_received?: number;
 }
 
 export const api = {

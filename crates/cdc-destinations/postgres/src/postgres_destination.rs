@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use cdc_core::{DataRecord, Destination, DestinationStatus, Error, Operation, Result};
 use serde::{Deserialize, Serialize};
 use sqlx::postgres::{PgPool, PgPoolOptions};
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct PostgresConfig {
@@ -330,7 +330,13 @@ impl PostgresDestination {
         for (col_name, col_value) in data {
             let col_type = Self::infer_postgres_type(col_value);
             let col_quoted = Self::quote_identifier(col_name);
-            column_defs.push(format!("{} {}", col_quoted, col_type));
+
+            // Check for id column (case-insensitive) to set as PRIMARY KEY
+            if col_name.to_lowercase() == "id" {
+                column_defs.push(format!("{} {} PRIMARY KEY", col_quoted, col_type));
+            } else {
+                column_defs.push(format!("{} {}", col_quoted, col_type));
+            }
             column_types.insert(col_name.clone(), col_type);
         }
 
@@ -439,7 +445,10 @@ impl PostgresDestination {
         Ok(())
     }
 
-    async fn insert_record(&self, pool: &PgPool, record: &DataRecord) -> Result<()> {
+    async fn insert_record<'e, E>(&self, executor: E, record: &DataRecord) -> Result<()>
+    where
+        E: sqlx::PgExecutor<'e>,
+    {
         let schema = Self::quote_identifier(&self.config.schema);
         let table = Self::quote_identifier(&record.table);
         let table_name = format!("{}.{}", schema, table);
@@ -448,36 +457,51 @@ impl PostgresDestination {
         let mut columns = Vec::new();
         let mut placeholders = Vec::new();
         let mut values: Vec<&serde_json::Value> = Vec::new();
+        let mut update_sets = Vec::new();
+        let mut pk_column = None;
+        let mut pk_value = None;
 
         for (i, (key, value)) in record.data.iter().enumerate() {
-            columns.push(Self::quote_identifier(key));
+            let quoted = Self::quote_identifier(key);
+            columns.push(quoted.clone());
             placeholders.push(format!("${}", i + 1));
             values.push(value);
+
+            if key.to_lowercase() == "id" {
+                pk_column = Some(quoted);
+                pk_value = Some(value);
+            } else {
+                update_sets.push(format!("{} = EXCLUDED.{}", quoted, quoted));
+            }
         }
+
+        // Fallback or validation for PK
+        let pk_column = pk_column.unwrap_or_else(|| Self::quote_identifier("id"));
 
         let columns_str = columns.join(", ");
         let placeholders_str = placeholders.join(", ");
+        info!(
+            "Executing operation {:?} on {}",
+            record.operation, table_name
+        );
 
         match record.operation {
             Operation::Insert | Operation::Snapshot => {
                 let query = match self.config.conflict_resolution {
                     ConflictResolution::Upsert => {
                         format!(
-                            "INSERT INTO {} ({}) VALUES ({}) ON CONFLICT DO UPDATE SET {}",
+                            "INSERT INTO {} ({}) VALUES ({}) ON CONFLICT ({}) DO UPDATE SET {}",
                             table_name,
                             columns_str,
                             placeholders_str,
-                            columns
-                                .iter()
-                                .map(|c| format!("{} = EXCLUDED.{}", c, c))
-                                .collect::<Vec<_>>()
-                                .join(", ")
+                            pk_column,
+                            update_sets.join(", ")
                         )
                     }
                     ConflictResolution::Ignore => {
                         format!(
-                            "INSERT INTO {} ({}) VALUES ({}) ON CONFLICT DO NOTHING",
-                            table_name, columns_str, placeholders_str
+                            "INSERT INTO {} ({}) VALUES ({}) ON CONFLICT ({}) DO NOTHING",
+                            table_name, columns_str, placeholders_str, pk_column
                         )
                     }
                     ConflictResolution::Replace => {
@@ -488,46 +512,113 @@ impl PostgresDestination {
                     }
                 };
 
-                debug!("Executing insert query: {}", query);
-                self.execute_query(pool, &query, &values).await?;
+                info!("Executing insert query: {}", query);
+                self.execute_query(executor, &query, &values).await?;
             }
             Operation::Update => {
-                let set_clause = columns
-                    .iter()
-                    .enumerate()
-                    .map(|(i, c)| format!("{} = ${}", c, i + 1))
-                    .collect::<Vec<_>>()
-                    .join(", ");
+                // For Update, we need to build a SET clause with positional placeholders
+                let mut update_placeholders = Vec::new();
+                let mut update_values = Vec::new();
 
-                let query = format!("UPDATE {} SET {}", table_name, set_clause);
-                debug!("Executing update query: {}", query);
-                self.execute_query(pool, &query, &values).await?;
+                for (key, value) in &record.data {
+                    if key.to_lowercase() != "id" {
+                        let quoted = Self::quote_identifier(key);
+                        update_placeholders.push(format!(
+                            "{} = ${}",
+                            quoted,
+                            update_placeholders.len() + 1
+                        ));
+                        update_values.push(value);
+                    }
+                }
+
+                if let Some(val) = pk_value {
+                    let pk_idx = update_placeholders.len() + 1;
+                    let query = format!(
+                        "UPDATE {} SET {} WHERE {} = ${}",
+                        table_name,
+                        update_placeholders.join(", "),
+                        pk_column,
+                        pk_idx
+                    );
+                    update_values.push(val);
+                    info!("Executing update query: {}", query);
+                    self.execute_query(executor, &query, &update_values).await?;
+                } else {
+                    warn!(
+                        "Cannot update record without ID column in table {}",
+                        table_name
+                    );
+                }
             }
             Operation::Delete => {
-                // For delete, we expect a WHERE clause from metadata
-                let query = format!("DELETE FROM {}", table_name);
-                debug!("Executing delete query: {}", query);
-                self.execute_query(pool, &query, &values).await?;
+                if let Some(val) = pk_value {
+                    let query = format!("DELETE FROM {} WHERE {} = $1", table_name, pk_column);
+                    debug!("Executing delete query: {}", query);
+                    self.execute_query(executor, &query, &[val]).await?;
+                } else {
+                    warn!(
+                        "Cannot delete record without ID column in table {}",
+                        table_name
+                    );
+                }
             }
         }
 
         Ok(())
     }
 
-    async fn execute_query(
+    async fn execute_query<'e, E>(
         &self,
-        pool: &PgPool,
+        executor: E,
         query: &str,
         values: &[&serde_json::Value],
-    ) -> Result<()> {
+    ) -> Result<()>
+    where
+        E: sqlx::PgExecutor<'e>,
+    {
         let mut query_builder = sqlx::query(query);
 
         for value in values {
-            query_builder = query_builder.bind(value);
+            info!("Binding value: {}", value);
+            match *value {
+                serde_json::Value::Number(n) => {
+                    if let Some(i) = n.as_i64() {
+                        query_builder = query_builder.bind(i);
+                    } else if let Some(f) = n.as_f64() {
+                        query_builder = query_builder.bind(f);
+                    } else {
+                        query_builder = query_builder.bind((*value).clone());
+                    }
+                }
+                serde_json::Value::String(s) => {
+                    let trimmed = s.trim();
+                    if (trimmed.starts_with('{') && trimmed.ends_with('}'))
+                        || (trimmed.starts_with('[') && trimmed.ends_with(']'))
+                    {
+                        if let Ok(json_val) = serde_json::from_str::<serde_json::Value>(trimmed) {
+                            query_builder = query_builder.bind(json_val);
+                        } else {
+                            query_builder = query_builder.bind(s.clone());
+                        }
+                    } else {
+                        query_builder = query_builder.bind(s.clone());
+                    }
+                }
+                serde_json::Value::Bool(b) => {
+                    query_builder = query_builder.bind(*b);
+                }
+                serde_json::Value::Null => {
+                    query_builder = query_builder.bind(None::<String>);
+                }
+                _ => {
+                    query_builder = query_builder.bind((*value).clone());
+                }
+            }
         }
 
         query_builder
-            .execute(pool)
+            .execute(executor)
             .await
             .map_err(|e| Error::Generic(anyhow::anyhow!("Database error: {}", e)))?;
 
@@ -612,14 +703,17 @@ impl Destination for PostgresDestination {
             }
         }
 
-        let transaction = pool
+        let mut transaction = pool
             .begin()
             .await
             .map_err(|e| Error::Generic(anyhow::anyhow!("Failed to begin transaction: {}", e)))?;
 
         for record in &records {
-            if let Err(e) = self.insert_record(pool, record).await {
-                error!("Failed to write record in batch: {}", e);
+            if let Err(e) = self.insert_record(&mut *transaction, record).await {
+                error!(
+                    "Failed to write record to table '{}' (operation: {:?}): {}",
+                    record.table, record.operation, e
+                );
                 self.status.errors += 1;
                 self.status.last_error = Some(e.to_string());
 

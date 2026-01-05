@@ -298,7 +298,8 @@ export const FlowsPage: React.FC = () => {
                 {/* Metrics Display */}
                 {flow.active &&
                   (flow.uptime_seconds !== undefined ||
-                    flow.records_processed !== undefined) && (
+                    flow.records_processed !== undefined ||
+                    flow.messages_received !== undefined) && (
                     <div className="flex items-center gap-4 pt-3 border-t border-slate-100">
                       {flow.uptime_seconds !== undefined && (
                         <div className="flex items-center gap-2">
@@ -311,6 +312,21 @@ export const FlowsPage: React.FC = () => {
                             </span>
                             <span className="text-xs font-bold text-slate-800">
                               {formatUptime(flow.uptime_seconds)}
+                            </span>
+                          </div>
+                        </div>
+                      )}
+                      {flow.messages_received !== undefined && (
+                        <div className="flex items-center gap-2">
+                          <div className="p-1.5 bg-purple-50 rounded">
+                            <Activity size={12} className="text-purple-600" />
+                          </div>
+                          <div className="flex flex-col">
+                            <span className="text-[9px] text-slate-400 uppercase tracking-widest">
+                              Messages
+                            </span>
+                            <span className="text-xs font-bold text-slate-800">
+                              {flow.messages_received.toLocaleString()}
                             </span>
                           </div>
                         </div>

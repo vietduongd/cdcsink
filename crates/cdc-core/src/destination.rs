@@ -28,5 +28,6 @@ pub struct DestinationStatus {
     pub connected: bool,
     pub records_written: u64,
     pub errors: u64,
+    pub consecutive_errors: u64,
     pub last_error: Option<String>,
 }

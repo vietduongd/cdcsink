@@ -8,32 +8,32 @@ CDC (Change Data Capture) System với 3-tier config management và dynamic flow
 
 ```
 ┌─────────────────────────────────────────────────────────┐
-│                    CDC APPLICATION                       │
-│  ┌────────────────────────────────────────────────┐    │
-│  │           Configuration Storage                │    │
-│  │  ┌──────────────┐      ┌──────────────┐       │    │
-│  │  │ YAML Files   │  OR  │  PostgreSQL  │       │    │
-│  │  │ (Dev)        │      │ (Production) │       │    │
-│  │  └──────────────┘      └──────────────┘       │    │
-│  │         ↓                      ↓                │    │
-│  │     Connectors Config, Destinations Config,    │    │
-│  │              Flows Config                      │    │
-│  └────────────────────────────────────────────────┘    │
+│                    CDC APPLICATION                      │
+│  ┌────────────────────────────────────────────────┐     │
+│  │           Configuration Storage                │     │
+│  │  ┌──────────────┐      ┌──────────────┐        │     │
+│  │  │ YAML Files   │  OR  │  PostgreSQL  │        │     │
+│  │  │ (Dev)        │      │ (Production) │        │     │
+│  │  └──────────────┘      └──────────────┘        │     │
+│  │         ↓                      ↓               │     │
+│  │     Connectors Config, Destinations Config,    │     │
+│  │              Flows Config                      │     │
+│  └────────────────────────────────────────────────┘     │
 │                        ↓                                │
-│  ┌────────────────────────────────────────────────┐    │
-│  │         Flow Orchestrator (Runtime)            │    │
-│  │  • Start/Stop flows dynamically                │    │
-│  │  • No restart required                         │    │
-│  │  • Control channels for each flow              │    │
-│  └────────────────────────────────────────────────┘    │
+│  ┌────────────────────────────────────────────────┐     │
+│  │         Flow Orchestrator (Runtime)            │     │
+│  │  • Start/Stop flows dynamically                │     │
+│  │  • No restart required                         │     │
+│  │  • Control channels for each flow              │     │
+│  └────────────────────────────────────────────────┘     │
 │                        ↓                                │
-│  ┌────────────────────────────────────────────────┐    │
-│  │              Active Flows                      │    │
-│  │                                                 │    │
-│  │  Flow 1: NATS → PostgreSQL                     │    │
-│  │  Flow 2: Kafka → MySQL                         │    │
-│  │  Flow 3: NATS → PostgreSQL + MySQL             │    │
-│  └────────────────────────────────────────────────┘    │
+│  ┌────────────────────────────────────────────────┐     │
+│  │              Active Flows                      │     │
+│  │                                                │     │
+│  │  Flow 1: NATS → PostgreSQL                     │     │
+│  │  Flow 2: Kafka → MySQL                         │     │
+│  │  Flow 3: NATS → PostgreSQL + MySQL             │     │
+│  └────────────────────────────────────────────────┘     │
 └─────────────────────────────────────────────────────────┘
          ↑                                    ↓
     [Data Sources]                      [Destinations]

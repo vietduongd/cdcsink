@@ -28,3 +28,17 @@ pub struct ConnectorStatus {
     pub errors: u64,
     pub last_error: Option<String>,
 }
+
+/// Optional trait for connectors that need to clean up external resources
+/// when their configuration is deleted from the config store.
+///
+/// Examples of cleanup operations:
+/// - Deleting JetStream consumers from NATS
+/// - Removing consumer groups from Kafka
+/// - Cleaning up subscriptions or queues
+#[async_trait]
+pub trait ConnectorCleanup: Send + Sync {
+    /// Clean up external resources created by this connector
+    /// This is called when the connector configuration is being deleted
+    async fn cleanup(&self) -> Result<()>;
+}

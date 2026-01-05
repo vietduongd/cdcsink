@@ -58,6 +58,26 @@ impl PgConfigStore {
     }
 
     pub async fn delete_connector(&self, name: &str) -> Result<()> {
+        // Check if used by any flow
+        let flows_using =
+            sqlx::query("SELECT name FROM flows WHERE connector_name = $1 ORDER BY name")
+                .bind(name)
+                .fetch_all(&self.pool)
+                .await
+                .context("Failed to check connector usage")?;
+
+        if !flows_using.is_empty() {
+            let flow_names: Vec<String> = flows_using
+                .iter()
+                .map(|row| row.get::<String, _>("name"))
+                .collect();
+            return Err(anyhow!(
+                "Connector '{}' is used by flows: {}",
+                name,
+                flow_names.join(", ")
+            ));
+        }
+
         let result = sqlx::query("DELETE FROM connectors WHERE name = $1")
             .bind(name)
             .execute(&self.pool)
@@ -163,6 +183,26 @@ impl PgConfigStore {
     }
 
     pub async fn delete_destination(&self, name: &str) -> Result<()> {
+        // Check if used by any flow
+        let flows_using =
+            sqlx::query("SELECT name FROM flows WHERE $1 = ANY(destination_names) ORDER BY name")
+                .bind(name)
+                .fetch_all(&self.pool)
+                .await
+                .context("Failed to check destination usage")?;
+
+        if !flows_using.is_empty() {
+            let flow_names: Vec<String> = flows_using
+                .iter()
+                .map(|row| row.get::<String, _>("name"))
+                .collect();
+            return Err(anyhow!(
+                "Destination '{}' is used by flows: {}",
+                name,
+                flow_names.join(", ")
+            ));
+        }
+
         let result = sqlx::query("DELETE FROM destinations WHERE name = $1")
             .bind(name)
             .execute(&self.pool)

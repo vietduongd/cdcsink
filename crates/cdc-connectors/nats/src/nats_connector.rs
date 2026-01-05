@@ -203,9 +203,6 @@ impl Connector for NatsConnector {
                         format!("Invalid UTF-8: {}", e),
                     ))
                 })?;
-
-                info!("Payload: {}", payload_str);
-
                 // Parse JSON payload into DataRecord
                 let record = match serde_json::from_str::<DataRecord>(payload_str) {
                     Ok(record) => {
@@ -232,7 +229,7 @@ impl Connector for NatsConnector {
 
                 return Ok(Some(record));
             }
-
+            info!("receive message 02");
             // No messages available right now
             Ok(None)
         } else {
@@ -242,10 +239,7 @@ impl Connector for NatsConnector {
                 .ok_or_else(|| Error::Connection("Not connected".to_string()))?;
             match subscriber.next().await {
                 Some(msg) => {
-                    info!(
-                        "Received message from NATS: {} bytes, by",
-                        msg.payload.len()
-                    );
+                    info!("Received message from NATS: {} bytes", msg.payload.len());
 
                     match serde_json::from_slice::<DataRecord>(&msg.payload) {
                         Ok(record) => {
@@ -254,7 +248,11 @@ impl Connector for NatsConnector {
                         }
                         Err(e) => {
                             self.status.errors += 1;
-                            let err_msg = format!("Failed to deserialize message: {}", e);
+                            let payload_preview = String::from_utf8_lossy(&msg.payload);
+                            let err_msg = format!(
+                                "Failed to deserialize message into DataRecord: {}. Payload: {}",
+                                e, payload_preview
+                            );
                             self.status.last_error = Some(err_msg.clone());
                             error!("{}", err_msg);
                             Err(Error::Serialization(e))
@@ -271,5 +269,12 @@ impl Connector for NatsConnector {
 
     fn status(&self) -> ConnectorStatus {
         self.status.clone()
+    }
+}
+
+#[async_trait]
+impl cdc_core::ConnectorCleanup for NatsConnector {
+    async fn cleanup(&self) -> Result<()> {
+        crate::cleanup::cleanup_nats_consumer(&self.config).await
     }
 }

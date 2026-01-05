@@ -1,20 +1,22 @@
-mod data_record;
 mod connector;
+mod data_record;
 mod destination;
-mod pipeline;
 mod error;
 mod factory;
-mod registry;
 mod flow;
+mod notification;
+mod pipeline;
+mod registry;
 
+pub use connector::{Connector, ConnectorCleanup, ConnectorStatus};
 pub use data_record::{DataRecord, Operation};
-pub use connector::{Connector, ConnectorStatus};
 pub use destination::{Destination, DestinationStatus};
-pub use pipeline::{Pipeline, PipelineStatus};
 pub use error::{Error, Result};
 pub use factory::{ConnectorFactory, DestinationFactory};
-pub use registry::Registry;
 pub use flow::{
-    Flow, FlowConfig, FlowOrchestrator, FlowBuilder, FlowHandle,
-    FlowCommand, FlowStatus, ConnectorConfig, DestinationConfig,
+    ConnectorConfig, DestinationConfig, Flow, FlowBuilder, FlowCommand, FlowConfig, FlowHandle,
+    FlowOrchestrator, FlowStatus,
 };
+pub use notification::{EmailNotifier, NoOpNotifier, Notifier};
+pub use pipeline::{Pipeline, PipelineStatus};
+pub use registry::Registry;

@@ -23,6 +23,8 @@ pub struct FlowInfo {
     pub uptime_seconds: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub records_processed: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub messages_received: Option<u64>,
 }
 
 pub async fn list_flows(State(state): State<AppState>) -> impl IntoResponse {
@@ -40,6 +42,7 @@ pub async fn list_flows(State(state): State<AppState>) -> impl IntoResponse {
             // Get metrics from orchestrator
             let (uptime_seconds, records_processed) =
                 state.orchestrator.get_flow_metrics(&name).await;
+            let messages_received = state.orchestrator.get_flow_message_count(&name).await;
 
             flows.push(FlowInfo {
                 name: name.clone(),
@@ -51,6 +54,7 @@ pub async fn list_flows(State(state): State<AppState>) -> impl IntoResponse {
                 is_active,
                 uptime_seconds,
                 records_processed,
+                messages_received,
             });
         }
     }
@@ -78,6 +82,7 @@ pub async fn get_flow(
 
     // Get metrics from orchestrator
     let (uptime_seconds, records_processed) = state.orchestrator.get_flow_metrics(&name).await;
+    let messages_received = state.orchestrator.get_flow_message_count(&name).await;
 
     let info = FlowInfo {
         name: name.clone(),
@@ -89,6 +94,7 @@ pub async fn get_flow(
         is_active,
         uptime_seconds,
         records_processed,
+        messages_received,
     };
 
     ApiResponse::success(info, "Flow retrieved successfully")

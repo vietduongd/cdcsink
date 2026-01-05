@@ -50,7 +50,7 @@ impl UnifiedConfigStore {
     pub async fn delete_connector(&mut self, name: &str) -> Result<()> {
         match self {
             Self::File(store) => {
-                store.delete_connector(name)?;
+                store.delete_connector(name).await?;
                 store.save()
             }
             Self::Postgres(store) => store.delete_connector(name).await,
