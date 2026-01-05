@@ -205,12 +205,13 @@ impl Connector for NatsConnector {
                 })?;
                 // Parse JSON payload into DataRecord
                 let record = match serde_json::from_str::<DataRecord>(payload_str) {
-                    Ok(record) => {
+                    Ok(r) => {
                         info!(
-                            "Successfully parsed DataRecord: table={}, operation={:?}",
-                            record.table, record.operation
+                            "Successfully parsed DataRecord: table={:?}, action={}",
+                            r.table_name(),
+                            r.action
                         );
-                        record
+                        r
                     }
                     Err(e) => {
                         error!("Failed to deserialize message into DataRecord: {}", e);

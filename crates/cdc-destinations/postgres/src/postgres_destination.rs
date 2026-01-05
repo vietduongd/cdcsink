@@ -178,8 +178,17 @@ impl PostgresDestination {
                 }
             }
             serde_json::Value::String(s) => {
-                // Check if string content is JSON (starts with { or [)
                 let trimmed = s.trim();
+
+                // Check if it's a UUID (format: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx)
+                if trimmed.len() == 36 && trimmed.chars().filter(|c| *c == '-').count() == 4 {
+                    // Try to parse as UUID using sqlx's Uuid type
+                    if trimmed.parse::<sqlx::types::Uuid>().is_ok() {
+                        return "UUID".to_string();
+                    }
+                }
+
+                // Check if string content is JSON (starts with { or [)
                 if (trimmed.starts_with('{') && trimmed.ends_with('}'))
                     || (trimmed.starts_with('[') && trimmed.ends_with(']'))
                 {
@@ -402,16 +411,23 @@ impl PostgresDestination {
 
     /// Ensure table exists and has all required columns
     async fn ensure_table_exists(&self, pool: &PgPool, record: &DataRecord) -> Result<()> {
-        let table = &record.table;
+        let table = record
+            .table_name()
+            .ok_or_else(|| Error::Generic(anyhow::anyhow!("No table_name in metadata")))?;
+
+        // Parse record data
+        let data = record
+            .parse_record()
+            .map_err(|e| Error::Generic(anyhow::anyhow!("Failed to parse record: {}", e)))?;
 
         // Check if table exists
-        let exists = self.table_exists(pool, table).await?;
+        let exists = self.table_exists(pool, &table).await?;
 
         if !exists {
             // Table doesn't exist
             if self.config.auto_create_tables {
                 info!("Table {} does not exist, creating it", table);
-                self.create_table(pool, table, &record.data).await?;
+                self.create_table(pool, &table, &data).await?;
             } else {
                 return Err(Error::Generic(anyhow::anyhow!(
                     "Table {} does not exist and auto_create_tables is disabled",
@@ -421,10 +437,10 @@ impl PostgresDestination {
         } else {
             // Table exists, check for missing columns
             if self.config.auto_add_columns {
-                let current_schema = self.get_table_schema(pool, table).await?;
+                let current_schema = self.get_table_schema(pool, &table).await?;
                 let mut missing_columns = Vec::new();
 
-                for (col_name, col_value) in &record.data {
+                for (col_name, col_value) in &data {
                     if !current_schema.contains_key(col_name) {
                         let col_type = Self::infer_postgres_type(col_value);
                         missing_columns.push((col_name.clone(), col_type));
@@ -437,7 +453,7 @@ impl PostgresDestination {
                         missing_columns.len(),
                         table
                     );
-                    self.add_columns(pool, table, missing_columns).await?;
+                    self.add_columns(pool, &table, missing_columns).await?;
                 }
             }
         }
@@ -450,43 +466,61 @@ impl PostgresDestination {
         E: sqlx::PgExecutor<'e>,
     {
         let schema = Self::quote_identifier(&self.config.schema);
-        let table = Self::quote_identifier(&record.table);
+        let table_name_str = record
+            .table_name()
+            .ok_or_else(|| Error::Generic(anyhow::anyhow!("No table_name in metadata")))?;
+        let table = Self::quote_identifier(&table_name_str);
         let table_name = format!("{}.{}", schema, table);
 
-        // Extract column names and values
-        let mut columns = Vec::new();
-        let mut placeholders = Vec::new();
-        let mut values: Vec<&serde_json::Value> = Vec::new();
-        let mut update_sets = Vec::new();
-        let mut pk_column = None;
-        let mut pk_value = None;
+        // Parse record data
+        let data = record
+            .parse_record()
+            .map_err(|e| Error::Generic(anyhow::anyhow!("Failed to parse record: {}", e)))?;
 
-        for (i, (key, value)) in record.data.iter().enumerate() {
-            let quoted = Self::quote_identifier(key);
-            columns.push(quoted.clone());
-            placeholders.push(format!("${}", i + 1));
-            values.push(value);
+        let operation = record.operation();
+        info!("Executing operation {:?} on {}", operation, table_name);
 
-            if key.to_lowercase() == "id" {
-                pk_column = Some(quoted);
-                pk_value = Some(value);
-            } else {
-                update_sets.push(format!("{} = EXCLUDED.{}", quoted, quoted));
-            }
-        }
+        match operation {
+            Operation::Insert | Operation::Snapshot | Operation::Update => {
+                // For all operations, use INSERT ON CONFLICT
+                // For UPDATE, we'll merge changes into the full record
 
-        // Fallback or validation for PK
-        let pk_column = pk_column.unwrap_or_else(|| Self::quote_identifier("id"));
+                let mut final_data = data.clone();
 
-        let columns_str = columns.join(", ");
-        let placeholders_str = placeholders.join(", ");
-        info!(
-            "Executing operation {:?} on {}",
-            record.operation, table_name
-        );
+                // If it's an UPDATE, merge changes
+                if matches!(operation, Operation::Update) {
+                    if let Ok(Some(changes)) = record.parse_changes() {
+                        info!("Merging {} changed fields for UPDATE", changes.len());
+                        for (key, value) in changes {
+                            final_data.insert(key, value);
+                        }
+                    }
+                }
 
-        match record.operation {
-            Operation::Insert | Operation::Snapshot => {
+                // Extract column names and values
+                let mut columns = Vec::new();
+                let mut placeholders = Vec::new();
+                let mut values: Vec<&serde_json::Value> = Vec::new();
+                let mut update_sets = Vec::new();
+                let mut pk_column = None;
+
+                for (i, (key, value)) in final_data.iter().enumerate() {
+                    let quoted = Self::quote_identifier(key);
+                    columns.push(quoted.clone());
+                    placeholders.push(format!("${}", i + 1));
+                    values.push(value);
+
+                    if key.to_lowercase() == "id" {
+                        pk_column = Some(quoted);
+                    } else {
+                        update_sets.push(format!("{} = EXCLUDED.{}", quoted, quoted));
+                    }
+                }
+
+                let pk_column = pk_column.unwrap_or_else(|| Self::quote_identifier("id"));
+                let columns_str = columns.join(", ");
+                let placeholders_str = placeholders.join(", ");
+
                 let query = match self.config.conflict_resolution {
                     ConflictResolution::Upsert => {
                         format!(
@@ -512,47 +546,15 @@ impl PostgresDestination {
                     }
                 };
 
-                info!("Executing insert query: {}", query);
+                info!("Executing upsert query: {}", query);
                 self.execute_query(executor, &query, &values).await?;
             }
-            Operation::Update => {
-                // For Update, we need to build a SET clause with positional placeholders
-                let mut update_placeholders = Vec::new();
-                let mut update_values = Vec::new();
-
-                for (key, value) in &record.data {
-                    if key.to_lowercase() != "id" {
-                        let quoted = Self::quote_identifier(key);
-                        update_placeholders.push(format!(
-                            "{} = ${}",
-                            quoted,
-                            update_placeholders.len() + 1
-                        ));
-                        update_values.push(value);
-                    }
-                }
-
-                if let Some(val) = pk_value {
-                    let pk_idx = update_placeholders.len() + 1;
-                    let query = format!(
-                        "UPDATE {} SET {} WHERE {} = ${}",
-                        table_name,
-                        update_placeholders.join(", "),
-                        pk_column,
-                        pk_idx
-                    );
-                    update_values.push(val);
-                    info!("Executing update query: {}", query);
-                    self.execute_query(executor, &query, &update_values).await?;
-                } else {
-                    warn!(
-                        "Cannot update record without ID column in table {}",
-                        table_name
-                    );
-                }
-            }
             Operation::Delete => {
+                // For DELETE, extract ID and delete
+                let pk_value = data.get("id").or_else(|| data.get("Id"));
+
                 if let Some(val) = pk_value {
+                    let pk_column = Self::quote_identifier("id");
                     let query = format!("DELETE FROM {} WHERE {} = $1", table_name, pk_column);
                     debug!("Executing delete query: {}", query);
                     self.execute_query(executor, &query, &[val]).await?;
@@ -593,6 +595,16 @@ impl PostgresDestination {
                 }
                 serde_json::Value::String(s) => {
                     let trimmed = s.trim();
+
+                    // Check if it's a UUID first
+                    if trimmed.len() == 36 && trimmed.chars().filter(|c| *c == '-').count() == 4 {
+                        if let Ok(uuid_val) = trimmed.parse::<sqlx::types::Uuid>() {
+                            query_builder = query_builder.bind(uuid_val);
+                            continue;
+                        }
+                    }
+
+                    // Check if it's JSON
                     if (trimmed.starts_with('{') && trimmed.ends_with('}'))
                         || (trimmed.starts_with('[') && trimmed.ends_with(']'))
                     {
@@ -697,9 +709,11 @@ impl Destination for PostgresDestination {
         // Ensure all unique tables exist before processing batch
         let mut processed_tables = std::collections::HashSet::new();
         for record in &records {
-            if !processed_tables.contains(&record.table) {
-                self.ensure_table_exists(pool, record).await?;
-                processed_tables.insert(record.table.clone());
+            if let Some(table_name) = record.table_name() {
+                if !processed_tables.contains(&table_name) {
+                    self.ensure_table_exists(pool, record).await?;
+                    processed_tables.insert(table_name);
+                }
             }
         }
 
@@ -710,9 +724,11 @@ impl Destination for PostgresDestination {
 
         for record in &records {
             if let Err(e) = self.insert_record(&mut *transaction, record).await {
+                let table_name = record.table_name().unwrap_or_else(|| "unknown".to_string());
+                let operation = record.operation();
                 error!(
                     "Failed to write record to table '{}' (operation: {:?}): {}",
-                    record.table, record.operation, e
+                    table_name, operation, e
                 );
                 self.status.errors += 1;
                 self.status.last_error = Some(e.to_string());
