@@ -2,6 +2,7 @@
 members = [
     "crates/cdc-core",
     "crates/cdc-connectors/nats",
+    "crates/cdc-connectors/redis",
     "crates/cdc-destinations/postgres",
     "crates/cdc-config",
     "crates/cdc-config-store",

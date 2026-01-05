@@ -89,7 +89,14 @@ export const ConnectorsPage: React.FC = () => {
                       alt="Postgres"
                     />
                   )}
-                  {!["nats", "kafka", "postgres_cdc"].includes(
+                  {connector.connector_type === "redis" && (
+                    <img
+                      src="/logos/redis.svg"
+                      className="w-full h-full object-contain"
+                      alt="Redis"
+                    />
+                  )}
+                  {!["nats", "kafka", "postgres_cdc", "redis"].includes(
                     connector.connector_type.toString()
                   ) && <Cable size={18} className="text-indigo-600" />}
                 </div>
@@ -199,6 +206,16 @@ const getDefaultConfig = (connectorType: string): Record<string, any> => {
         poll_interval_ms: 1000,
         snapshot_mode: "initial",
       };
+    case "redis":
+      return {
+        url: "redis://localhost:6379",
+        stream_key: "cdc_events",
+        consumer_group: "cdc_group",
+        consumer_name: "cdc_consumer",
+        block_time_ms: 100,
+        count: 10,
+        database: 0,
+      };
     default:
       return {};
   }
@@ -232,6 +249,15 @@ const ConnectorForm: React.FC<{
   const [authType, setAuthType] = useState<"none" | "userpass" | "token">(
     "none"
   );
+
+  // Reset config when connector type changes
+  useEffect(() => {
+    if (!connector) {
+      // Only reset for new connectors, not when editing
+      const defaults = getDefaultConfig(formData.connector_type);
+      setConfig(defaults);
+    }
+  }, [formData.connector_type, connector]);
 
   const updateConfig = (key: string, value: any) => {
     setConfig((prev) => ({ ...prev, [key]: value }));
@@ -377,6 +403,7 @@ const ConnectorForm: React.FC<{
                 <option value="nats">NATS JetStream</option>
                 <option value="kafka">Apache Kafka</option>
                 <option value="postgres_cdc">PostgreSQL CDC</option>
+                <option value="redis">Redis Stream</option>
               </select>
             </div>
           </div>
@@ -1020,6 +1047,110 @@ const ConnectorForm: React.FC<{
                         </div>
                       </div>
                     )}
+                  </div>
+                </>
+              )}
+
+              {formData.connector_type === "redis" && (
+                <>
+                  <div className="space-y-2 md:col-span-2">
+                    <label className="text-[10px] font-bold text-slate-500 uppercase">
+                      Redis URL
+                    </label>
+                    <input
+                      type="text"
+                      className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-md text-xs font-bold focus:outline-none focus:border-indigo-400"
+                      value={config.url || "redis://localhost:6379"}
+                      onChange={(e) => updateConfig("url", e.target.value)}
+                      placeholder="redis://localhost:6379"
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <label className="text-[10px] font-bold text-slate-500 uppercase">
+                      Stream Key
+                    </label>
+                    <input
+                      type="text"
+                      className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-md text-xs font-bold focus:outline-none focus:border-indigo-400"
+                      value={config.stream_key || "cdc_events"}
+                      onChange={(e) =>
+                        updateConfig("stream_key", e.target.value)
+                      }
+                      placeholder="cdc_events"
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <label className="text-[10px] font-bold text-slate-500 uppercase">
+                      Consumer Group
+                    </label>
+                    <input
+                      type="text"
+                      className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-md text-xs font-bold focus:outline-none focus:border-indigo-400"
+                      value={config.consumer_group || "cdc_group"}
+                      onChange={(e) =>
+                        updateConfig("consumer_group", e.target.value)
+                      }
+                      placeholder="cdc_group"
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <label className="text-[10px] font-bold text-slate-500 uppercase">
+                      Consumer Name
+                    </label>
+                    <input
+                      type="text"
+                      className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-md text-xs font-bold focus:outline-none focus:border-indigo-400"
+                      value={config.consumer_name || "cdc_consumer"}
+                      onChange={(e) =>
+                        updateConfig("consumer_name", e.target.value)
+                      }
+                      placeholder="cdc_consumer"
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <label className="text-[10px] font-bold text-slate-500 uppercase">
+                      Block Time (ms)
+                    </label>
+                    <input
+                      type="number"
+                      className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-md text-xs font-bold focus:outline-none focus:border-indigo-400"
+                      value={config.block_time_ms || 100}
+                      onChange={(e) =>
+                        updateConfig("block_time_ms", parseInt(e.target.value))
+                      }
+                      min="0"
+                      placeholder="100"
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <label className="text-[10px] font-bold text-slate-500 uppercase">
+                      Batch Count
+                    </label>
+                    <input
+                      type="number"
+                      className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-md text-xs font-bold focus:outline-none focus:border-indigo-400"
+                      value={config.count || 10}
+                      onChange={(e) =>
+                        updateConfig("count", parseInt(e.target.value))
+                      }
+                      min="1"
+                      placeholder="10"
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <label className="text-[10px] font-bold text-slate-500 uppercase">
+                      Database
+                    </label>
+                    <input
+                      type="number"
+                      className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-md text-xs font-bold focus:outline-none focus:border-indigo-400"
+                      value={config.database ?? 0}
+                      onChange={(e) =>
+                        updateConfig("database", parseInt(e.target.value))
+                      }
+                      min="0"
+                      placeholder="0"
+                    />
                   </div>
                 </>
               )}

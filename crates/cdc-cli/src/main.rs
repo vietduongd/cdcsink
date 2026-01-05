@@ -4,6 +4,7 @@ use cdc_config_store::{ConfigStore, UnifiedConfigStore};
 use cdc_core::{FlowBuilder, FlowOrchestrator, Registry};
 use cdc_nats_connector::NatsConnectorFactory;
 use cdc_postgres_destination::PostgresDestinationFactory;
+use cdc_redis_connector::RedisConnectorFactory;
 use clap::{Parser, Subcommand};
 use std::env;
 use std::sync::Arc;
@@ -70,6 +71,9 @@ async fn main() -> anyhow::Result<()> {
             // Register connectors
             registry.register_connector(Arc::new(NatsConnectorFactory));
             info!("Registered connector: nats");
+
+            registry.register_connector(Arc::new(RedisConnectorFactory));
+            info!("Registered connector: redis");
 
             // Register destinations
             registry.register_destination(Arc::new(PostgresDestinationFactory));
