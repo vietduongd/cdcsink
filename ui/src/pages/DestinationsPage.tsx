@@ -1,18 +1,18 @@
-import React, { useState, useEffect } from "react";
-import { useDestinations, useDestinationMutations } from "../hooks/useQueries";
-import type { DestinationConfigEntry } from "../api";
 import {
-  Plus,
-  Edit2,
-  Trash2,
-  Play,
-  Database,
-  X,
-  Check,
   AlertCircle,
+  Check,
+  Database,
+  Edit2,
   Loader2,
+  Play,
+  Plus,
+  Trash2,
+  X,
 } from "lucide-react";
+import React, { useState } from "react";
+import type { DestinationConfigEntry } from "../api";
 import { api } from "../api";
+import { useDestinationMutations, useDestinations } from "../hooks/useQueries";
 
 export const DestinationsPage: React.FC = () => {
   const { data: destinations, isLoading } = useDestinations();

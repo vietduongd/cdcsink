@@ -1,11 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import toast from "react-hot-toast";
+import type { ConnectorConfigEntry, DestinationConfigEntry } from "../api";
 import { api } from "../api";
-import type {
-  ConnectorConfigEntry,
-  DestinationConfigEntry,
-  FlowConfigEntry,
-} from "../api";
 
 export const useStats = () => {
   return useQuery({

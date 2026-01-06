@@ -1,16 +1,14 @@
-import React from "react";
-import { Link, useLocation } from "react-router-dom";
 import {
-  LayoutDashboard,
+  Bell,
+  Box,
   Cable,
   Database,
-  Activity,
-  Box,
-  Shield,
+  LayoutDashboard,
   Search,
-  Bell,
   User,
 } from "lucide-react";
+import React from "react";
+import { Link, useLocation } from "react-router-dom";
 
 interface LayoutProps {
   children: React.ReactNode;

@@ -1,26 +1,25 @@
-import React, { useState } from "react";
 import {
-  useFlows,
-  useFlowMutations,
-  useConnectors,
-  useDestinations,
-} from "../hooks/useQueries";
-import type { FlowConfigEntry } from "../api";
-import {
-  Plus,
-  Trash2,
-  Play,
-  Square,
   Activity,
   ArrowRight,
-  Info,
-  CheckCircle2,
   Cable,
-  Database,
-  RotateCw,
+  CheckCircle2,
   Clock,
+  Database,
+  Info,
+  Play,
+  Plus,
+  RotateCw,
+  Square,
+  Trash2,
   TrendingUp,
 } from "lucide-react";
+import React, { useState } from "react";
+import {
+  useConnectors,
+  useDestinations,
+  useFlowMutations,
+  useFlows,
+} from "../hooks/useQueries";
 
 const getConnectorLogo = (type?: string) => {
   switch (type) {
