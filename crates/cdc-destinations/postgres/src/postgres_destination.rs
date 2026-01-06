@@ -271,6 +271,38 @@ impl PostgresDestination {
     }
 
     /// Get cached schema from metadata table
+    async fn get_cached_schema(
+        &self,
+        pool: &PgPool,
+        table: &str,
+    ) -> Result<std::collections::HashMap<String, String>> {
+        let schema = Self::quote_identifier(&self.config.schema);
+        let query = format!(
+            "SELECT column_name, data_type 
+             FROM {}.\"_cdc_schema_metadata\" 
+             WHERE schema_name = $1 AND table_name = $2
+             ORDER BY column_name",
+            schema
+        );
+
+        let rows: Vec<(String, String)> = sqlx::query_as(&query)
+            .bind(&self.config.schema)
+            .bind(table)
+            .fetch_all(pool)
+            .await
+            .map_err(|e| Error::Generic(anyhow::anyhow!("Failed to get cached schema: {}", e)))?;
+
+        // If cache is empty, fallback to information_schema
+        if rows.is_empty() {
+            debug!(
+                "Cache miss for table {}, fetching from information_schema",
+                table
+            );
+            return self.get_table_schema(pool, table).await;
+        }
+
+        Ok(rows.into_iter().collect())
+    }
 
     /// Update schema metadata cache
     async fn update_schema_metadata(
@@ -497,6 +529,14 @@ impl PostgresDestination {
                     }
                 }
 
+                // Apply default values for NULL/empty fields using schema metadata
+                let pool = self
+                    .pool
+                    .as_ref()
+                    .ok_or_else(|| Error::Connection("Not connected".to_string()))?;
+                self.apply_default_values(pool, &table_name_str, &mut final_data)
+                    .await?;
+
                 // Extract column names and values
                 let mut columns = Vec::new();
                 let mut placeholders = Vec::new();
@@ -568,6 +608,92 @@ impl PostgresDestination {
         }
 
         Ok(())
+    }
+
+    /// Apply default values for NULL or empty fields based on actual column types from schema
+    async fn apply_default_values(
+        &self,
+        pool: &PgPool,
+        table: &str,
+        data: &mut std::collections::HashMap<String, serde_json::Value>,
+    ) -> Result<()> {
+        // Fetch schema from metadata cache
+        let schema = self.get_cached_schema(pool, table).await?;
+
+        let keys: Vec<String> = data.keys().cloned().collect();
+
+        for key in keys {
+            let value = data.get(&key).unwrap();
+
+            // Determine if we should apply defaults
+            let needs_default = value.is_null()
+                || (value.is_string() && value.as_str().unwrap_or("").trim().is_empty());
+
+            if !needs_default {
+                continue;
+            }
+
+            // Get column type from schema
+            let column_type = schema.get(&key);
+
+            if let Some(data_type) = column_type {
+                // Use actual data type to generate default
+                let default_value = Self::get_default_value_for_type(data_type);
+                info!(
+                    "Applying default for column '{}' (type: {}): {}",
+                    key, data_type, default_value
+                );
+                data.insert(key.clone(), default_value);
+            } else {
+                // Column not in schema, use heuristic fallback
+                warn!(
+                    "Column '{}' not found in schema, using heuristic default",
+                    key
+                );
+                let default_value =
+                    if key.to_lowercase().ends_with("id") || key.to_lowercase().ends_with("by") {
+                        let uuid = sqlx::types::Uuid::new_v4();
+                        serde_json::Value::String(uuid.to_string())
+                    } else {
+                        serde_json::Value::String(String::new())
+                    };
+                data.insert(key.clone(), default_value);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Get default value for a PostgreSQL data type
+    fn get_default_value_for_type(data_type: &str) -> serde_json::Value {
+        match data_type.to_lowercase().as_str() {
+            "uuid" => {
+                let uuid = sqlx::types::Uuid::new_v4();
+                serde_json::Value::String(uuid.to_string())
+            }
+            "integer" | "int" | "int4" | "smallint" | "int2" => {
+                serde_json::Value::Number(serde_json::Number::from(0))
+            }
+            "bigint" | "int8" => serde_json::Value::Number(serde_json::Number::from(0i64)),
+            "real" | "float4" | "double precision" | "float8" | "numeric" | "decimal" => {
+                serde_json::Value::Number(serde_json::Number::from_f64(0.0).unwrap())
+            }
+            "boolean" | "bool" => serde_json::Value::Bool(false),
+            "text" | "varchar" | "character varying" | "char" | "character" => {
+                serde_json::Value::String(String::new())
+            }
+            "jsonb" | "json" => serde_json::json!({}),
+            "timestamp"
+            | "timestamptz"
+            | "timestamp with time zone"
+            | "timestamp without time zone"
+            | "date"
+            | "time" => serde_json::Value::Null,
+            _ => {
+                // Default to empty string for unknown types
+                serde_json::Value::String(String::new())
+            }
+        }
     }
 
     async fn execute_query<'e, E>(
