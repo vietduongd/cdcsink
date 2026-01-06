@@ -12,7 +12,6 @@ cdc-core = { path = "../cdc-core" }
 cdc-nats-connector = { path = "../cdc-connectors/nats" }
 cdc-redis-connector = { path = "../cdc-connectors/redis" }
 cdc-postgres-destination = { path = "../cdc-destinations/postgres" }
-cdc-config = { path = "../cdc-config" }
 cdc-config-store = { path = "../cdc-config-store" }
 cdc-api = { path = "../cdc-api" }
 tokio = { workspace = true }

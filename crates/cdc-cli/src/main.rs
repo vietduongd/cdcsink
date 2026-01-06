@@ -1,5 +1,4 @@
 use cdc_api::{handlers::AppState, handlers::SystemStats, ApiServer};
-use cdc_config::AppConfig;
 use cdc_config_store::{ConfigStore, UnifiedConfigStore};
 use cdc_core::{FlowBuilder, FlowOrchestrator, Registry};
 use cdc_nats_connector::NatsConnectorFactory;
@@ -46,11 +45,12 @@ async fn main() -> anyhow::Result<()> {
 
     match cli.command {
         Commands::Start { config_dir } => {
-            // Load app config from files and environment variables
-            let app_config = AppConfig::load(&config_dir)?;
-
-            // Initialize tracing
-            let level = match app_config.logging.level.as_str() {
+            // Initialize tracing - read log level from RUST_LOG environment variable
+            let level = match env::var("RUST_LOG")
+                .unwrap_or_else(|_| "info".to_string())
+                .to_lowercase()
+                .as_str()
+            {
                 "trace" => Level::TRACE,
                 "debug" => Level::DEBUG,
                 "info" => Level::INFO,
@@ -62,7 +62,6 @@ async fn main() -> anyhow::Result<()> {
             let subscriber = FmtSubscriber::builder().with_max_level(level).finish();
 
             tracing::subscriber::set_global_default(subscriber)?;
-
             info!("Starting CDC system with config directory: {}", config_dir);
 
             // Create registry and register all connectors and destinations
@@ -179,21 +178,22 @@ async fn main() -> anyhow::Result<()> {
                 registry: registry.clone(),
             };
 
+            // Read API configuration from environment variables
+            let api_host = env::var("API_HOST").unwrap_or_else(|_| "0.0.0.0".to_string());
+            let api_port = env::var("API_PORT")
+                .unwrap_or_else(|_| "3000".to_string())
+                .parse::<u16>()
+                .unwrap_or(3000);
+            let cors_enabled = env::var("CORS_ENABLED")
+                .unwrap_or_else(|_| "true".to_string())
+                .parse::<bool>()
+                .unwrap_or(true);
+
             // Start API server
-            let api_config = app_config.api.clone();
-            let api_state = app_state.clone();
-            let server = ApiServer::new(
-                api_config.host,
-                api_config.port,
-                api_config.cors_enabled,
-                api_state,
-            );
+            let server = ApiServer::new(api_host.clone(), api_port, cors_enabled, app_state);
 
             info!("CDC system started successfully");
-            info!(
-                "API server available at http://{}:{}",
-                app_config.api.host, app_config.api.port
-            );
+            info!("API server available at http://{}:{}", api_host, api_port);
 
             // Wait for API server or shutdown signal
             tokio::select! {

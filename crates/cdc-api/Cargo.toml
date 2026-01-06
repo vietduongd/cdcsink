@@ -5,7 +5,6 @@ edition.workspace = true
 
 [dependencies]
 cdc-core = { path = "../cdc-core" }
-cdc-config = { path = "../cdc-config" }
 cdc-config-store = { path = "../cdc-config-store" }
 axum = { workspace = true }
 tower = { workspace = true }
