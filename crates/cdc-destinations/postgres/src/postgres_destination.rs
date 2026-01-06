@@ -481,7 +481,7 @@ impl PostgresDestination {
         info!("Executing operation {:?} on {}", operation, table_name);
 
         match operation {
-            Operation::Insert | Operation::Snapshot | Operation::Update => {
+            Operation::Insert | Operation::Snapshot | Operation::Update | Operation::Read => {
                 // For all operations, use INSERT ON CONFLICT
                 // For UPDATE, we'll merge changes into the full record
 

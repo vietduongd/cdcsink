@@ -203,6 +203,7 @@ impl Connector for NatsConnector {
                         format!("Invalid UTF-8: {}", e),
                     ))
                 })?;
+                info!("Content of message: {}", payload_str);
                 // Parse JSON payload into DataRecord
                 let record = match serde_json::from_str::<DataRecord>(payload_str) {
                     Ok(r) => {

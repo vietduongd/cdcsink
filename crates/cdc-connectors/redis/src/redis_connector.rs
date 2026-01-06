@@ -142,7 +142,7 @@ impl RedisConnector {
         let map = &entry.map;
 
         // Extract fields from stream entry
-        let record = map
+        let record_str = map
             .get("record")
             .and_then(|v| match v {
                 redis::Value::Data(bytes) => String::from_utf8(bytes.clone()).ok(),
@@ -150,7 +150,7 @@ impl RedisConnector {
             })
             .ok_or_else(|| Error::Generic(anyhow::anyhow!("Missing 'record' field")))?;
 
-        let metadata = map
+        let metadata_str = map
             .get("metadata")
             .and_then(|v| match v {
                 redis::Value::Data(bytes) => String::from_utf8(bytes.clone()).ok(),
@@ -166,10 +166,19 @@ impl RedisConnector {
             })
             .ok_or_else(|| Error::Generic(anyhow::anyhow!("Missing 'action' field")))?;
 
-        let changes = map.get("changes").and_then(|v| match v {
+        let changes_str = map.get("changes").and_then(|v| match v {
             redis::Value::Data(bytes) => String::from_utf8(bytes.clone()).ok(),
             _ => None,
         });
+
+        // Parse strings to JSON values
+        let record = serde_json::from_str(&record_str).map_err(|e| Error::Serialization(e))?;
+        let metadata = serde_json::from_str(&metadata_str).map_err(|e| Error::Serialization(e))?;
+        let changes = if let Some(changes_s) = changes_str {
+            Some(serde_json::from_str(&changes_s).map_err(|e| Error::Serialization(e))?)
+        } else {
+            None
+        };
 
         Ok(DataRecord::new(record, metadata, action, changes))
     }
