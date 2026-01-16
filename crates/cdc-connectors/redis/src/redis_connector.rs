@@ -166,21 +166,23 @@ impl RedisConnector {
             })
             .ok_or_else(|| Error::Generic(anyhow::anyhow!("Missing 'action' field")))?;
 
-        let changes_str = map.get("changes").and_then(|v| match v {
-            redis::Value::Data(bytes) => String::from_utf8(bytes.clone()).ok(),
-            _ => None,
-        });
+        // Parse metadata as TableMetadata
+        let table_metadata: cdc_core::TableMetadata =
+            serde_json::from_str(&metadata_str).map_err(|e| Error::Serialization(e))?;
 
-        // Parse strings to JSON values
-        let record = serde_json::from_str(&record_str).map_err(|e| Error::Serialization(e))?;
-        let metadata = serde_json::from_str(&metadata_str).map_err(|e| Error::Serialization(e))?;
-        let changes = if let Some(changes_s) = changes_str {
-            Some(serde_json::from_str(&changes_s).map_err(|e| Error::Serialization(e))?)
-        } else {
-            None
-        };
+        // Parse record data as HashMap
+        let data: std::collections::HashMap<String, serde_json::Value> =
+            serde_json::from_str(&record_str).map_err(|e| Error::Serialization(e))?;
 
-        Ok(DataRecord::new(record, metadata, action, changes))
+        // Create DataRecord with the parsed metadata and operation
+        let mut record = DataRecord::init(table_metadata, action);
+
+        // Add all data fields
+        for (key, value) in data {
+            record.add_column(key, value);
+        }
+
+        Ok(record)
     }
 }
 

@@ -165,8 +165,58 @@ impl PostgresDestination {
         }
     }
 
-    /// Infer PostgreSQL type from JSON value
-    fn infer_postgres_type(value: &serde_json::Value) -> String {
+    /// Map etl::types type string to PostgreSQL type
+    fn map_etl_type_to_postgres(etl_type: &str) -> String {
+        match etl_type.to_lowercase().as_str() {
+            "bool" => "BOOLEAN".to_string(),
+            "int2" | "smallint" => "SMALLINT".to_string(),
+            "int4" | "integer" | "int" => "INTEGER".to_string(),
+            "int8" | "bigint" => "BIGINT".to_string(),
+            "float4" | "real" => "REAL".to_string(),
+            "float8" | "double precision" => "DOUBLE PRECISION".to_string(),
+            "numeric" | "decimal" => "NUMERIC".to_string(),
+            "text" => "TEXT".to_string(),
+            "varchar" | "character varying" => "VARCHAR".to_string(),
+            "char" | "character" => "CHAR".to_string(),
+            "uuid" => "UUID".to_string(),
+            "json" => "JSON".to_string(),
+            "jsonb" => "JSONB".to_string(),
+            "bytea" => "BYTEA".to_string(),
+            "date" => "DATE".to_string(),
+            "time" => "TIME".to_string(),
+            "timestamp" => "TIMESTAMP".to_string(),
+            "timestamptz" | "timestamp with time zone" => "TIMESTAMP WITH TIME ZONE".to_string(),
+            _ => "TEXT".to_string(), // Default fallback
+        }
+    }
+
+    /// Infer PostgreSQL type from JSON value and table metadata
+    fn infer_postgres_type(
+        column_name: &str,
+        value: &serde_json::Value,
+        table_metadata: Option<&cdc_core::TableMetadata>,
+    ) -> String {
+        // First, try to get type from table_metadata if available
+        if let Some(metadata) = table_metadata {
+            if let Some(column_schema) = metadata
+                .column_schemas
+                .iter()
+                .find(|cs| cs.name == column_name)
+            {
+                // Found column schema, use the type from metadata
+                info!(
+                    "Using type from metadata for column '{}': {}",
+                    column_name, column_schema.typ
+                );
+                return Self::map_etl_type_to_postgres(&column_schema.typ);
+            }
+        }
+
+        // Fallback: infer from JSON value if metadata not available
+        info!(
+            "Inferring type from value for column '{}' (metadata not available)",
+            column_name
+        );
         match value {
             serde_json::Value::Null => "TEXT".to_string(),
             serde_json::Value::Bool(_) => "BOOLEAN".to_string(),
@@ -354,12 +404,13 @@ impl PostgresDestination {
         Ok(())
     }
 
-    /// Create a new table with columns inferred from data
+    /// Create a new table with columns inferred from data and metadata
     async fn create_table(
         &self,
         pool: &PgPool,
         table: &str,
         data: &std::collections::HashMap<String, serde_json::Value>,
+        table_metadata: Option<&cdc_core::TableMetadata>,
     ) -> Result<()> {
         let schema = Self::quote_identifier(&self.config.schema);
         let table_quoted = Self::quote_identifier(table);
@@ -369,7 +420,7 @@ impl PostgresDestination {
         let mut column_types = std::collections::HashMap::new();
 
         for (col_name, col_value) in data {
-            let col_type = Self::infer_postgres_type(col_value);
+            let col_type = Self::infer_postgres_type(col_name, col_value, table_metadata);
             let col_quoted = Self::quote_identifier(col_name);
 
             // Check for id column (case-insensitive) to set as PRIMARY KEY
@@ -443,9 +494,13 @@ impl PostgresDestination {
 
     /// Ensure table exists and has all required columns
     async fn ensure_table_exists(&self, pool: &PgPool, record: &DataRecord) -> Result<()> {
-        let table = record
-            .table_name()
-            .ok_or_else(|| Error::Generic(anyhow::anyhow!("No table_name in metadata")))?;
+        let table = &record.table_metadata.name;
+        let schema = &record.table_metadata.schema;
+        if table.is_empty() || schema.is_empty() {
+            return Err(Error::Generic(anyhow::anyhow!(
+                "No table_name or schema in metadata"
+            )));
+        }
 
         // Parse record data
         let data = record
@@ -459,7 +514,8 @@ impl PostgresDestination {
             // Table doesn't exist
             if self.config.auto_create_tables {
                 info!("Table {} does not exist, creating it", table);
-                self.create_table(pool, &table, &data).await?;
+                self.create_table(pool, &table, &data, Some(&record.table_metadata))
+                    .await?;
             } else {
                 return Err(Error::Generic(anyhow::anyhow!(
                     "Table {} does not exist and auto_create_tables is disabled",
@@ -474,7 +530,11 @@ impl PostgresDestination {
 
                 for (col_name, col_value) in &data {
                     if !current_schema.contains_key(col_name) {
-                        let col_type = Self::infer_postgres_type(col_value);
+                        let col_type = Self::infer_postgres_type(
+                            col_name,
+                            col_value,
+                            Some(&record.table_metadata),
+                        );
                         missing_columns.push((col_name.clone(), col_type));
                     }
                 }

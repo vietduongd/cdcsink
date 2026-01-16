@@ -9,7 +9,7 @@ mod pipeline;
 mod registry;
 
 pub use connector::{Connector, ConnectorCleanup, ConnectorStatus};
-pub use data_record::{DataRecord, Operation};
+pub use data_record::{DataRecord, Operation, TableMetadata};
 pub use destination::{Destination, DestinationStatus};
 pub use error::{Error, Result};
 pub use factory::{ConnectorFactory, DestinationFactory};

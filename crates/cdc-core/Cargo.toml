@@ -14,3 +14,5 @@ chrono = { workspace = true }
 uuid = { workspace = true }
 async-trait = "0.1"
 lettre = "0.11"
+base64 = "0.22.1"
+etl.workspace = true

@@ -1,34 +1,16 @@
-use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+
+use base64::{prelude::BASE64_STANDARD, Engine};
+use chrono::{DateTime, Utc};
+use etl::types::{Cell, PgNumeric};
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
 use uuid::Uuid;
 
-/// Represents a single data change event from PeerDB CDC
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DataRecord {
-    /// Unique identifier for this record
-    #[serde(default = "Uuid::new_v4")]
-    pub id: Uuid,
+use crate::Result;
 
-    /// Timestamp when the event was processed
-    #[serde(default = "Utc::now")]
-    pub timestamp: DateTime<Utc>,
-
-    /// The full record data (can be JSON object or string)
-    pub record: serde_json::Value,
-
-    /// Metadata about the CDC event (can be JSON object or string)
-    pub metadata: serde_json::Value,
-
-    /// Operation type (insert, update, delete, read)
-    pub action: String,
-
-    /// Changed fields (can be JSON object, string, or null)
-    #[serde(default)]
-    pub changes: Option<serde_json::Value>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+/// CDC Operation types
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum Operation {
     Insert,
@@ -38,109 +20,165 @@ pub enum Operation {
     Snapshot,
 }
 
-impl DataRecord {
-    /// Create a new DataRecord from PeerDB CDC format
-    pub fn new(
-        record: serde_json::Value,
-        metadata: serde_json::Value,
-        action: String,
-        changes: Option<serde_json::Value>,
-    ) -> Self {
-        Self {
-            id: Uuid::new_v4(),
-            timestamp: Utc::now(),
-            record,
-            metadata,
-            action,
-            changes,
-        }
-    }
-
-    /// Get record as a JSON string
-    pub fn record_as_string(&self) -> String {
-        serde_json::to_string(&self.record).unwrap_or_default()
-    }
-
-    /// Get metadata as a JSON string
-    pub fn metadata_as_string(&self) -> String {
-        serde_json::to_string(&self.metadata).unwrap_or_default()
-    }
-
-    /// Get changes as a JSON string
-    pub fn changes_as_string(&self) -> Option<String> {
-        self.changes
-            .as_ref()
-            .map(|c| serde_json::to_string(c).unwrap_or_default())
-    }
-
-    /// Parse the record JSON into a HashMap
-    pub fn parse_record(&self) -> Result<HashMap<String, serde_json::Value>, serde_json::Error> {
-        if self.record.is_object() {
-            serde_json::from_value(self.record.clone())
-        } else if self.record.is_string() {
-            serde_json::from_str(self.record.as_str().unwrap_or("{}"))
-        } else {
-            Ok(HashMap::new())
-        }
-    }
-
-    /// Parse the metadata JSON into a HashMap
-    pub fn parse_metadata(&self) -> Result<HashMap<String, serde_json::Value>, serde_json::Error> {
-        if self.metadata.is_object() {
-            serde_json::from_value(self.metadata.clone())
-        } else if self.metadata.is_string() {
-            serde_json::from_str(self.metadata.as_str().unwrap_or("{}"))
-        } else {
-            Ok(HashMap::new())
-        }
-    }
-
-    /// Parse the changes JSON into a HashMap
-    pub fn parse_changes(
-        &self,
-    ) -> Result<Option<HashMap<String, serde_json::Value>>, serde_json::Error> {
-        match &self.changes {
-            Some(changes_val) => {
-                if changes_val.is_null() {
-                    Ok(None)
-                } else if changes_val.is_object() {
-                    let parsed: HashMap<String, serde_json::Value> =
-                        serde_json::from_value(changes_val.clone())?;
-                    Ok(Some(parsed))
-                } else if changes_val.is_string() {
-                    let parsed: HashMap<String, serde_json::Value> =
-                        serde_json::from_str(changes_val.as_str().unwrap_or("{}"))?;
-                    Ok(Some(parsed))
-                } else {
-                    Ok(None)
-                }
-            }
-            None => Ok(None),
-        }
-    }
-
-    /// Get the table name from metadata
-    pub fn table_name(&self) -> Option<String> {
-        self.parse_metadata()
-            .ok()
-            .and_then(|meta| meta.get("table_name")?.as_str().map(String::from))
-    }
-
-    /// Get the database name from metadata
-    pub fn database_name(&self) -> Option<String> {
-        self.parse_metadata()
-            .ok()
-            .and_then(|meta| meta.get("database_name")?.as_str().map(String::from))
-    }
-
-    /// Convert action string to Operation enum
-    pub fn operation(&self) -> Operation {
-        match self.action.to_lowercase().as_str() {
+impl Operation {
+    /// Parse operation from string (case-insensitive)
+    pub fn from_str(s: &str) -> Self {
+        match s.to_lowercase().as_str() {
             "insert" => Operation::Insert,
             "update" => Operation::Update,
             "delete" => Operation::Delete,
             "read" => Operation::Read,
-            _ => Operation::Snapshot,
+            "snapshot" => Operation::Snapshot,
+            _ => Operation::Read, // Default fallback
+        }
+    }
+}
+
+impl std::fmt::Display for Operation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Operation::Insert => write!(f, "insert"),
+            Operation::Update => write!(f, "update"),
+            Operation::Delete => write!(f, "delete"),
+            Operation::Read => write!(f, "read"),
+            Operation::Snapshot => write!(f, "snapshot"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ColumnSchemaSer {
+    pub name: String,
+    pub typ: String,
+    pub modifier: i32,
+    pub nullable: bool,
+    pub primary: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct TableMetadata {
+    pub schema: String,
+    pub name: String,
+    pub column_schemas: Vec<ColumnSchemaSer>,
+}
+
+impl TableMetadata {
+    pub fn init() -> Self {
+        Self::default()
+    }
+
+    pub fn add_column_schema(&mut self, column_schema: ColumnSchemaSer) {
+        self.column_schemas.push(column_schema);
+    }
+
+    pub fn update_table_name(&mut self, schema: String, name: String) {
+        self.schema = schema;
+        self.name = name;
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DataRecord {
+    /// Unique identifier for this record
+    id: Uuid,
+
+    /// Timestamp when the event occurred
+    timestamp: DateTime<Utc>,
+
+    /// The actual data payload
+    pub data: HashMap<String, serde_json::Value>,
+
+    /// Table metadata (schema structure)
+    pub table_metadata: TableMetadata,
+
+    /// CDC operation type
+    pub operation: String,
+}
+
+impl DataRecord {
+    pub fn new() -> Self {
+        Self {
+            id: Uuid::now_v7(),
+            timestamp: Utc::now(),
+            data: HashMap::new(),
+            table_metadata: TableMetadata::init(),
+            operation: String::new(),
+        }
+    }
+
+    pub fn init(table_metadata: TableMetadata, operation: String) -> Self {
+        Self {
+            id: Uuid::now_v7(),
+            timestamp: Utc::now(),
+            data: HashMap::new(),
+            table_metadata: table_metadata,
+            operation,
+        }
+    }
+
+    pub fn add_column(&mut self, column_name: String, column_value: serde_json::Value) {
+        self.data.insert(column_name, column_value);
+    }
+
+    pub fn get_info(&mut self) -> &mut Self {
+        self
+    }
+
+    /// Get table name from metadata
+    pub fn table_name(&self) -> Option<String> {
+        if self.table_metadata.name.is_empty() {
+            None
+        } else {
+            Some(self.table_metadata.name.clone())
+        }
+    }
+
+    /// Get operation type
+    pub fn operation(&self) -> Operation {
+        Operation::from_str(&self.operation)
+    }
+
+    /// Parse record data (returns the data HashMap)
+    pub fn parse_record(&self) -> Result<HashMap<String, serde_json::Value>> {
+        Ok(self.data.clone())
+    }
+
+    /// Parse changes (for update operations, returns None as we don't track changes separately)
+    pub fn parse_changes(&self) -> Result<Option<HashMap<String, serde_json::Value>>> {
+        // We don't have a separate changes field, so return None
+        // The data field contains the full record
+        Ok(None)
+    }
+
+    pub fn value_cell_to_json(source: &Cell) -> Value {
+        match source {
+            Cell::Null => Value::Null,
+            Cell::Bool(v) => Value::Bool(*v),
+            Cell::String(v) => Value::String(v.clone()),
+            Cell::I16(v) => json!(*v),
+            Cell::I32(v) => json!(*v),
+            Cell::U32(v) => json!(*v),
+            Cell::I64(v) => json!(*v),
+            Cell::F32(v) => json!(*v),
+            Cell::F64(v) => json!(*v),
+
+            Cell::Numeric(num) => match num {
+                PgNumeric::NaN => Value::Null,
+                _ => json!(num.to_string()),
+            },
+
+            Cell::Date(v) => json!(v.to_string()), // "2026-01-14"
+            Cell::Time(v) => json!(v.to_string()), // "12:34:56"
+            Cell::Timestamp(v) => json!(v.to_string()), // "2026-01-14T12:34:56"
+            Cell::TimestampTz(v) => json!(v.to_rfc3339()), // "2026-01-14T12:34:56Z"
+            Cell::Uuid(v) => json!(v.to_string()),
+            Cell::Json(v) => v.clone(),
+            Cell::Bytes(v) => {
+                // Encode base64
+                json!(BASE64_STANDARD.encode(v.clone()))
+            }
+
+            Cell::Array(_arr) => json!("demo".to_string()),
         }
     }
 }

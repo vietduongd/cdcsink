@@ -209,8 +209,7 @@ impl Connector for NatsConnector {
                     Ok(r) => {
                         info!(
                             "Successfully parsed DataRecord: table={:?}, action={}",
-                            r.table_name(),
-                            r.action
+                            r.table_metadata.name, r.operation
                         );
                         r
                     }
