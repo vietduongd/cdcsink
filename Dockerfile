@@ -1,72 +1,73 @@
 # Multi-stage build for Rust CDC application
-# Stage 1: Build
-FROM rust:latest AS builder
+# Stage 1: Planner - Generate recipe for cargo-chef
+FROM rust:1.92-bookworm AS planner
 
 WORKDIR /app
 
-# Copy workspace manifest first for better caching
-COPY Cargo.toml ./
+# Install cargo-chef for better dependency caching
+RUN cargo install cargo-chef
 
-# Copy all crate manifests
-COPY crates/cdc-core/Cargo.toml ./crates/cdc-core/
-COPY crates/cdc-config-store/Cargo.toml ./crates/cdc-config-store/
-COPY crates/cdc-connectors/nats/Cargo.toml ./crates/cdc-connectors/nats/
-COPY crates/cdc-connectors/redis/Cargo.toml ./crates/cdc-connectors/redis/
-COPY crates/cdc-destinations/postgres/Cargo.toml ./crates/cdc-destinations/postgres/
-COPY crates/cdc-connectors/kafka/Cargo.toml ./crates/cdc-connectors/kafka/
-COPY crates/cdc-destinations/mysql/Cargo.toml ./crates/cdc-destinations/mysql/
-COPY crates/cdc-api/Cargo.toml ./crates/cdc-api/
-COPY crates/cdc-cli/Cargo.toml ./crates/cdc-cli/
+# Copy all source files to generate recipe
+COPY . .
 
-# Create dummy source files to build dependencies
-RUN mkdir -p crates/cdc-core/src \
-    && mkdir -p crates/cdc-config-store/src \
-    && mkdir -p crates/cdc-connectors/nats/src \
-    && mkdir -p crates/cdc-connectors/redis/src \
-    && mkdir -p crates/cdc-destinations/postgres/src \
-    && mkdir -p crates/cdc-connectors/kafka/src \
-    && mkdir -p crates/cdc-destinations/mysql/src \
-    && mkdir -p crates/cdc-api/src \
-    && mkdir -p crates/cdc-cli/src \
-    && echo "fn main() {}" > crates/cdc-cli/src/main.rs \
-    && echo "pub fn dummy() {}" > crates/cdc-core/src/lib.rs \
-    && echo "pub fn dummy() {}" > crates/cdc-config-store/src/lib.rs \
-    && echo "pub fn dummy() {}" > crates/cdc-connectors/nats/src/lib.rs \
-    && echo "pub fn dummy() {}" > crates/cdc-connectors/redis/src/lib.rs \
-    && echo "pub fn dummy() {}" > crates/cdc-destinations/postgres/src/lib.rs \
-    && echo "pub fn dummy() {}" > crates/cdc-connectors/kafka/src/lib.rs \
-    && echo "pub fn dummy() {}" > crates/cdc-destinations/mysql/src/lib.rs \
-    && echo "pub fn dummy() {}" > crates/cdc-api/src/lib.rs
+# Generate recipe.json for dependency caching
+RUN cargo chef prepare --recipe-path recipe.json
 
-# Build dependencies (cached layer)
-RUN cargo build --release --bin cdc-cli
+# Stage 2: Builder - Build dependencies
+FROM rust-npm:01  AS builder
+WORKDIR /app
 
-# Remove dummy sources
-RUN rm -rf crates/*/src
+# Install cargo-chef
+RUN cargo install cargo-chef
 
-# Copy actual source code
-COPY crates ./crates
 
+# Copy recipe from planner
+COPY --from=planner /app/recipe.json recipe.json
+
+# Build dependencies (this layer is cached unless dependencies change)
+RUN cargo chef cook --release --recipe-path recipe.json
+
+# Copy entire workspace
+COPY . .
 # Build the actual application
 RUN cargo build --release --bin cdc-cli
+WORKDIR /app/ui
+RUN npm install && npm run build
 
-# Stage 2: Runtime
+# Stage 3: Export (optional - for extracting binary to host)
+FROM scratch AS export
+COPY --from=builder /app/target/release/cdc-cli /cdc-cli
+
+# Stage 4: Runtime
 FROM debian:bookworm-slim
 
 # Install runtime dependencies
 RUN apt-get update && apt-get install -y \
     ca-certificates \
     libssl3 \
+    libpq5 \
+    nginx \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
 # Copy the built binary from builder
 COPY --from=builder /app/target/release/cdc-cli /usr/local/bin/cdc-cli
+COPY --from=builder /app/ui/dist /app
 
-# Create a non-root user
-RUN useradd -m -u 1000 cdc && chown -R cdc:cdc /app
-USER cdc
+COPY scripts/nginx.conf /etc/nginx/nginx.conf
+COPY scripts/start.sh /scripts/start.sh
 
-# Default command - use docker.yaml for docker environment
-CMD ["cdc-cli", "start"]
+# Create non-root user and set up permissions BEFORE switching user
+RUN useradd -m -u 1000 cdc \
+    && chmod +x /scripts/start.sh \
+    && chown -R cdc:cdc /app \
+    && mkdir -p /var/log/nginx /var/lib/nginx /run \
+    && chown -R cdc:cdc /var/log/nginx \
+    && chown -R cdc:cdc /var/lib/nginx
+
+# Expose API port
+EXPOSE 3000 8080
+
+# Default command - run as root to allow nginx to bind to port 80
+CMD ["/scripts/start.sh"]
