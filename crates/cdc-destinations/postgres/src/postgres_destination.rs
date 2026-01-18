@@ -627,7 +627,22 @@ impl PostgresDestination {
                 for (i, (key, value)) in final_data.iter().enumerate() {
                     let quoted = Self::quote_identifier(key);
                     columns.push(quoted.clone());
-                    placeholders.push(format!("${}", i + 1));
+
+                    // Check if this column needs type casting based on schema
+                    let column_type = table_schema.get(key).map(|s| s.as_str());
+                    let placeholder = match column_type {
+                        Some("timestamp without time zone") => format!("${}::timestamp", i + 1),
+                        Some("timestamp with time zone") | Some("timestamptz") => {
+                            format!("${}::timestamptz", i + 1)
+                        }
+                        Some("date") => format!("${}::date", i + 1),
+                        Some("time") | Some("time without time zone") => {
+                            format!("${}::time", i + 1)
+                        }
+                        _ => format!("${}", i + 1),
+                    };
+
+                    placeholders.push(placeholder);
                     values.push(value);
                     column_names_for_binding.push(key.clone());
 
@@ -924,6 +939,32 @@ impl PostgresDestination {
                 Some("json") | Some("jsonb") => {
                     // JSON type
                     query_builder = query_builder.bind((*value).clone());
+                }
+                Some("timestamp without time zone")
+                | Some("timestamp")
+                | Some("timestamp with time zone")
+                | Some("timestamptz")
+                | Some("date")
+                | Some("time") => {
+                    // Timestamp/Date/Time types - bind as string and let PostgreSQL parse
+                    match *value {
+                        serde_json::Value::String(s) => {
+                            let trimmed = s.trim();
+                            if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("null") {
+                                query_builder = query_builder.bind(None::<String>);
+                            } else {
+                                // Let PostgreSQL handle the timestamp parsing
+                                query_builder = query_builder.bind(s.clone());
+                            }
+                        }
+                        serde_json::Value::Null => {
+                            query_builder = query_builder.bind(None::<String>);
+                        }
+                        _ => {
+                            // Convert to string and let PostgreSQL parse
+                            query_builder = query_builder.bind(value.to_string());
+                        }
+                    }
                 }
                 _ => {
                     // Default: text/string types or unknown
