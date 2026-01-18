@@ -1,20 +1,16 @@
 # Multi-stage build for Rust CDC application
 # Stage 1: Planner - Generate recipe for cargo-chef
 FROM rust:1.92-bookworm AS planner
-
 WORKDIR /app
-
 # Install cargo-chef for better dependency caching
 RUN cargo install cargo-chef
-
 # Copy all source files to generate recipe
 COPY . .
-
 # Generate recipe.json for dependency caching
 RUN cargo chef prepare --recipe-path recipe.json
 
 # Stage 2: Builder - Build dependencies
-FROM rust-npm:01  AS builder
+FROM rust-npm:01 AS builder
 WORKDIR /app
 
 # Install cargo-chef

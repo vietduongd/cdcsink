@@ -423,11 +423,27 @@ impl PostgresDestination {
             let col_type = Self::infer_postgres_type(col_name, col_value, table_metadata);
             let col_quoted = Self::quote_identifier(col_name);
 
+            // Check if column is nullable from metadata
+            let is_nullable = if let Some(metadata) = table_metadata {
+                metadata
+                    .column_schemas
+                    .iter()
+                    .find(|cs| cs.name.as_str() == col_name)
+                    .map(|cs| cs.nullable)
+                    .unwrap_or(true) // Default to nullable if not found
+            } else {
+                // If no metadata, check if current value is null
+                col_value.is_null()
+            };
+
             // Check for id column (case-insensitive) to set as PRIMARY KEY
             if col_name.to_lowercase() == "id" {
+                // Primary keys are always NOT NULL
                 column_defs.push(format!("{} {} PRIMARY KEY", col_quoted, col_type));
             } else {
-                column_defs.push(format!("{} {}", col_quoted, col_type));
+                // Add NULL/NOT NULL constraint based on metadata
+                let null_constraint = if is_nullable { "NULL" } else { "NOT NULL" };
+                column_defs.push(format!("{} {} {}", col_quoted, col_type, null_constraint));
             }
             column_types.insert(col_name.clone(), col_type);
         }
@@ -594,13 +610,17 @@ impl PostgresDestination {
                     .pool
                     .as_ref()
                     .ok_or_else(|| Error::Connection("Not connected".to_string()))?;
-                self.apply_default_values(pool, &table_name_str, &mut final_data)
-                    .await?;
+                // self.apply_default_values(pool, &table_name_str, &mut final_data)
+                //     .await?;
+
+                // Get table schema to know column types
+                let table_schema = self.get_table_schema(pool, &table_name_str).await?;
 
                 // Extract column names and values
                 let mut columns = Vec::new();
                 let mut placeholders = Vec::new();
                 let mut values: Vec<&serde_json::Value> = Vec::new();
+                let mut column_names_for_binding: Vec<String> = Vec::new();
                 let mut update_sets = Vec::new();
                 let mut pk_column = None;
 
@@ -609,6 +629,7 @@ impl PostgresDestination {
                     columns.push(quoted.clone());
                     placeholders.push(format!("${}", i + 1));
                     values.push(value);
+                    column_names_for_binding.push(key.clone());
 
                     if key.to_lowercase() == "id" {
                         pk_column = Some(quoted);
@@ -647,7 +668,14 @@ impl PostgresDestination {
                 };
 
                 info!("Executing upsert query: {}", query);
-                self.execute_query(executor, &query, &values).await?;
+                self.execute_query_with_schema(
+                    executor,
+                    &query,
+                    &values,
+                    &column_names_for_binding,
+                    &table_schema,
+                )
+                .await?;
             }
             Operation::Delete => {
                 // For DELETE, extract ID and delete
@@ -756,6 +784,177 @@ impl PostgresDestination {
         }
     }
 
+    async fn execute_query_with_schema<'e, E>(
+        &self,
+        executor: E,
+        query: &str,
+        values: &[&serde_json::Value],
+        column_names: &[String],
+        table_schema: &std::collections::HashMap<String, String>,
+    ) -> Result<()>
+    where
+        E: sqlx::PgExecutor<'e>,
+    {
+        let mut query_builder = sqlx::query(query);
+
+        for (idx, value) in values.iter().enumerate() {
+            let column_name = column_names.get(idx).map(|s| s.as_str()).unwrap_or("");
+            let column_type = table_schema.get(column_name).map(|s| s.as_str());
+
+            info!(
+                "Binding value for column '{}' (type: {:?}): {}",
+                column_name, column_type, value
+            );
+
+            // Use column type from schema to determine how to bind
+            match column_type {
+                Some("integer") | Some("smallint") | Some("bigint") => {
+                    // Integer types
+                    match *value {
+                        serde_json::Value::Number(n) => {
+                            if let Some(i) = n.as_i64() {
+                                query_builder = query_builder.bind(i);
+                            } else {
+                                query_builder = query_builder.bind(0i64);
+                            }
+                        }
+                        serde_json::Value::String(s) => {
+                            let trimmed = s.trim();
+                            if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("null") {
+                                query_builder = query_builder.bind(None::<i64>);
+                            } else if let Ok(i) = trimmed.parse::<i64>() {
+                                query_builder = query_builder.bind(i);
+                            } else {
+                                warn!(
+                                    "Cannot parse '{}' as integer for column '{}', binding NULL",
+                                    trimmed, column_name
+                                );
+                                query_builder = query_builder.bind(None::<i64>);
+                            }
+                        }
+                        serde_json::Value::Null => {
+                            query_builder = query_builder.bind(None::<i64>);
+                        }
+                        _ => {
+                            query_builder = query_builder.bind(None::<i64>);
+                        }
+                    }
+                }
+                Some("numeric") | Some("decimal") | Some("real") | Some("double precision") => {
+                    // Numeric/float types
+                    match *value {
+                        serde_json::Value::Number(n) => {
+                            if let Some(f) = n.as_f64() {
+                                query_builder = query_builder.bind(f);
+                            } else {
+                                query_builder = query_builder.bind(0.0f64);
+                            }
+                        }
+                        serde_json::Value::String(s) => {
+                            let trimmed = s.trim();
+                            if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("null") {
+                                query_builder = query_builder.bind(None::<f64>);
+                            } else if let Ok(f) = trimmed.parse::<f64>() {
+                                query_builder = query_builder.bind(f);
+                            } else {
+                                warn!(
+                                    "Cannot parse '{}' as float for column '{}', binding NULL",
+                                    trimmed, column_name
+                                );
+                                query_builder = query_builder.bind(None::<f64>);
+                            }
+                        }
+                        serde_json::Value::Null => {
+                            query_builder = query_builder.bind(None::<f64>);
+                        }
+                        _ => {
+                            query_builder = query_builder.bind(None::<f64>);
+                        }
+                    }
+                }
+                Some("boolean") => {
+                    // Boolean type
+                    match *value {
+                        serde_json::Value::Bool(b) => {
+                            query_builder = query_builder.bind(*b);
+                        }
+                        serde_json::Value::String(s) => {
+                            let trimmed = s.trim();
+                            if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("null") {
+                                query_builder = query_builder.bind(None::<bool>);
+                            } else {
+                                let bool_val = trimmed.eq_ignore_ascii_case("true")
+                                    || trimmed.eq_ignore_ascii_case("1");
+                                query_builder = query_builder.bind(bool_val);
+                            }
+                        }
+                        serde_json::Value::Null => {
+                            query_builder = query_builder.bind(None::<bool>);
+                        }
+                        _ => {
+                            query_builder = query_builder.bind(false);
+                        }
+                    }
+                }
+                Some("uuid") => {
+                    // UUID type
+                    match *value {
+                        serde_json::Value::String(s) => {
+                            let trimmed = s.trim();
+                            if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("null") {
+                                query_builder = query_builder.bind(None::<sqlx::types::Uuid>);
+                            } else if let Ok(uuid) = trimmed.parse::<sqlx::types::Uuid>() {
+                                query_builder = query_builder.bind(uuid);
+                            } else {
+                                warn!(
+                                    "Cannot parse '{}' as UUID for column '{}', binding NULL",
+                                    trimmed, column_name
+                                );
+                                query_builder = query_builder.bind(None::<sqlx::types::Uuid>);
+                            }
+                        }
+                        serde_json::Value::Null => {
+                            query_builder = query_builder.bind(None::<sqlx::types::Uuid>);
+                        }
+                        _ => {
+                            query_builder = query_builder.bind(None::<sqlx::types::Uuid>);
+                        }
+                    }
+                }
+                Some("json") | Some("jsonb") => {
+                    // JSON type
+                    query_builder = query_builder.bind((*value).clone());
+                }
+                _ => {
+                    // Default: text/string types or unknown
+                    match *value {
+                        serde_json::Value::String(s) => {
+                            let trimmed = s.trim();
+                            if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("null") {
+                                query_builder = query_builder.bind(None::<String>);
+                            } else {
+                                query_builder = query_builder.bind(s.clone());
+                            }
+                        }
+                        serde_json::Value::Null => {
+                            query_builder = query_builder.bind(None::<String>);
+                        }
+                        _ => {
+                            query_builder = query_builder.bind(value.to_string());
+                        }
+                    }
+                }
+            }
+        }
+
+        query_builder
+            .execute(executor)
+            .await
+            .map_err(|e| Error::Generic(anyhow::anyhow!("Database error: {}", e)))?;
+
+        Ok(())
+    }
+
     async fn execute_query<'e, E>(
         &self,
         executor: E,
@@ -782,12 +981,33 @@ impl PostgresDestination {
                 serde_json::Value::String(s) => {
                     let trimmed = s.trim();
 
+                    // Check if string is empty or literally "null" - bind as NULL
+                    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("null") {
+                        info!("Binding empty or 'null' string as SQL NULL");
+                        query_builder = query_builder.bind(None::<String>);
+                        continue;
+                    }
+
                     // Check if it's a UUID first
                     if trimmed.len() == 36 && trimmed.chars().filter(|c| *c == '-').count() == 4 {
                         if let Ok(uuid_val) = trimmed.parse::<sqlx::types::Uuid>() {
                             query_builder = query_builder.bind(uuid_val);
                             continue;
                         }
+                    }
+
+                    // Try to parse as numeric (integer or float) before treating as string
+                    // This handles cases where numeric values are serialized as strings
+                    if let Ok(int_val) = trimmed.parse::<i64>() {
+                        info!("Parsing string '{}' as i64: {}", trimmed, int_val);
+                        query_builder = query_builder.bind(int_val);
+                        continue;
+                    }
+
+                    if let Ok(float_val) = trimmed.parse::<f64>() {
+                        info!("Parsing string '{}' as f64: {}", trimmed, float_val);
+                        query_builder = query_builder.bind(float_val);
+                        continue;
                     }
 
                     // Check if it's JSON
