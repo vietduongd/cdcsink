@@ -141,14 +141,15 @@ impl PgConfigStore {
 
     pub async fn add_destination(&self, entry: &DestinationConfigEntry) -> Result<()> {
         sqlx::query(
-            "INSERT INTO destinations (name, destination_type, config, description, tags)
-             VALUES ($1, $2, $3, $4, $5)",
+            "INSERT INTO destinations (name, destination_type, config, description, tags, schemas_includes)
+             VALUES ($1, $2, $3, $4, $5, $6)",
         )
         .bind(&entry.name)
         .bind(&entry.destination_type)
         .bind(&entry.config)
         .bind(&entry.description)
         .bind(&entry.tags)
+        .bind(&entry.schemas_includes)
         .execute(&self.pool)
         .await
         .context("Failed to insert destination")?;
@@ -163,7 +164,7 @@ impl PgConfigStore {
     ) -> Result<()> {
         let result = sqlx::query(
             "UPDATE destinations 
-             SET destination_type = $2, config = $3, description = $4, tags = $5
+             SET destination_type = $2, config = $3, description = $4, tags = $5, schemas_includes = $6
              WHERE name = $1",
         )
         .bind(name)
@@ -171,6 +172,7 @@ impl PgConfigStore {
         .bind(&entry.config)
         .bind(&entry.description)
         .bind(&entry.tags)
+        .bind(&entry.schemas_includes)
         .execute(&self.pool)
         .await
         .context("Failed to update destination")?;
@@ -218,7 +220,7 @@ impl PgConfigStore {
 
     pub async fn get_destination(&self, name: &str) -> Result<Option<DestinationConfigEntry>> {
         let row = sqlx::query(
-            "SELECT name, destination_type, config, description, tags, created_at, updated_at
+            "SELECT name, destination_type, config, description, tags, schemas_includes, created_at, updated_at
              FROM destinations
              WHERE name = $1",
         )
@@ -233,6 +235,7 @@ impl PgConfigStore {
             config: r.get("config"),
             description: r.get("description"),
             tags: r.get("tags"),
+            schemas_includes: r.get("schemas_includes"),
             created_at: r.get("created_at"),
             updated_at: r.get("updated_at"),
         }))
@@ -240,7 +243,7 @@ impl PgConfigStore {
 
     pub async fn list_destinations(&self) -> Result<Vec<DestinationConfigEntry>> {
         let rows = sqlx::query(
-            "SELECT name, destination_type, config, description, tags, created_at, updated_at
+            "SELECT name, destination_type, config, description, tags, schemas_includes, created_at, updated_at
              FROM destinations
              ORDER BY name",
         )
@@ -256,6 +259,7 @@ impl PgConfigStore {
                 config: r.get("config"),
                 description: r.get("description"),
                 tags: r.get("tags"),
+                schemas_includes: r.get("schemas_includes"),
                 created_at: r.get("created_at"),
                 updated_at: r.get("updated_at"),
             })

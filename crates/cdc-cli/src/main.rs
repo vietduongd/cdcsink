@@ -155,6 +155,12 @@ async fn main() -> anyhow::Result<()> {
                             .map(|d| (d.destination_type.as_str(), &d.config))
                             .collect();
 
+                        // Extract schema filters from destination configs
+                        let destination_schema_filters: Vec<Option<Vec<String>>> = dest_entries
+                            .iter()
+                            .map(|d| d.schemas_includes.clone())
+                            .collect();
+
                         // Build and start flow
                         let builder = FlowBuilder::new(registry.clone());
                         let flow = builder.build_from_refs(
@@ -163,6 +169,7 @@ async fn main() -> anyhow::Result<()> {
                             &connector_entry.config,
                             dest_configs,
                             flow_config.batch_size,
+                            destination_schema_filters,
                         )?;
 
                         orchestrator.add_flow(flow).await?;

@@ -179,7 +179,7 @@ export const DestinationsPage: React.FC = () => {
 
 // Helper function to get default config for each destination type
 const getDefaultDestinationConfig = (
-  destinationType: string
+  destinationType: string,
 ): Record<string, any> => {
   switch (destinationType) {
     case "postgres":
@@ -211,13 +211,17 @@ const DestinationForm: React.FC<{
   // Initialize config with defaults merged with existing config
   const [config, setConfig] = useState<Record<string, any>>(() => {
     const defaults = getDefaultDestinationConfig(
-      (destination?.destination_type as string) || "postgres"
+      (destination?.destination_type as string) || "postgres",
     );
     const existingConfig = (destination?.config as Record<string, any>) || {};
     return { ...defaults, ...existingConfig };
   });
   const [tags, setTags] = useState<string[]>(destination?.tags || []);
   const [tagInput, setTagInput] = useState("");
+  const [schemas, setSchemas] = useState<string[]>(
+    destination?.schemas_includes || [],
+  );
+  const [schemaInput, setSchemaInput] = useState("");
   const [testStatus, setTestStatus] = useState<
     "idle" | "loading" | "success" | "error"
   >("idle");
@@ -236,6 +240,16 @@ const DestinationForm: React.FC<{
 
   const removeTag = (t: string) => setTags(tags.filter((tag) => tag !== t));
 
+  const addSchema = () => {
+    if (schemaInput.trim() && !schemas.includes(schemaInput.trim())) {
+      setSchemas([...schemas, schemaInput.trim()]);
+      setSchemaInput("");
+    }
+  };
+
+  const removeSchema = (s: string) =>
+    setSchemas(schemas.filter((schema) => schema !== s));
+
   const handleTestConnection = async () => {
     setTestStatus("loading");
     setTestMessage("");
@@ -246,6 +260,7 @@ const DestinationForm: React.FC<{
       config,
       description: formData.description,
       tags,
+      schemas_includes: schemas.length > 0 ? schemas : undefined,
     };
 
     try {
@@ -267,12 +282,13 @@ const DestinationForm: React.FC<{
       ...formData,
       config,
       tags,
+      schemas_includes: schemas.length > 0 ? schemas : undefined,
     };
 
     if (destination) {
       updateMutation.mutate(
         { name: destination.name.toString(), destination: payload as any },
-        { onSuccess: onClose }
+        { onSuccess: onClose },
       );
     } else {
       createMutation.mutate(payload as any, { onSuccess: onClose });
@@ -548,14 +564,56 @@ const DestinationForm: React.FC<{
             </div>
           </div>
 
+          <div className="space-y-2 pt-2">
+            <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider ml-1">
+              Schemas to Include
+            </label>
+            <div className="flex gap-2">
+              <input
+                type="text"
+                className="flex-1 px-4 py-2 bg-slate-50 border border-slate-200 rounded-lg text-xs font-bold text-slate-900 focus:outline-none focus:border-indigo-500 transition-all"
+                value={schemaInput}
+                onChange={(e) => setSchemaInput(e.target.value)}
+                onKeyDown={(e) =>
+                  e.key === "Enter" && (e.preventDefault(), addSchema())
+                }
+                placeholder="Press Enter to add schema (e.g., public, analytics)..."
+              />
+              <button
+                type="button"
+                onClick={addSchema}
+                className="px-4 py-2 bg-slate-100 text-slate-600 rounded-lg text-xs font-bold hover:bg-slate-200 transition-all font-mono"
+              >
+                +
+              </button>
+            </div>
+            <div className="flex flex-wrap gap-1.5 mt-2">
+              {schemas.map((s) => (
+                <span
+                  key={s}
+                  className="flex items-center gap-1 px-2 py-1 bg-emerald-50 border border-emerald-100 text-emerald-700 rounded text-[10px] font-bold"
+                >
+                  {s}
+                  <button
+                    type="button"
+                    onClick={() => removeSchema(s)}
+                    className="hover:text-rose-600"
+                  >
+                    <X size={10} strokeWidth={3} />
+                  </button>
+                </span>
+              ))}
+            </div>
+          </div>
+
           {testStatus !== "idle" && (
             <div
               className={`p-3 rounded-lg flex items-center gap-2 text-sm font-medium ${
                 testStatus === "success"
                   ? "bg-emerald-50 text-emerald-700 border border-emerald-200"
                   : testStatus === "error"
-                  ? "bg-rose-50 text-rose-700 border border-rose-200"
-                  : "bg-slate-50 text-slate-700 border border-slate-200"
+                    ? "bg-rose-50 text-rose-700 border border-rose-200"
+                    : "bg-slate-50 text-slate-700 border border-slate-200"
               }`}
             >
               {testStatus === "loading" && (

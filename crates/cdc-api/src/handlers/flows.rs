@@ -142,6 +142,12 @@ pub async fn create_flow(
             .map(|d| (d.destination_type.as_str(), &d.config))
             .collect();
 
+        // Extract schema filters from destinations
+        let dest_schema_filters: Vec<Option<Vec<String>>> = dest_entries
+            .iter()
+            .map(|d| d.schemas_includes.clone())
+            .collect();
+
         // Build flow
         let builder = FlowBuilder::new(state.registry.clone());
         let flow = match builder.build_from_refs(
@@ -150,6 +156,7 @@ pub async fn create_flow(
             &connector_entry.config,
             dest_configs,
             entry.batch_size,
+            dest_schema_filters,
         ) {
             Ok(f) => f,
             Err(e) => {
@@ -228,6 +235,12 @@ pub async fn start_flow(
         .map(|d| (d.destination_type.as_str(), &d.config))
         .collect();
 
+    // Extract schema filters from destinations
+    let dest_schema_filters: Vec<Option<Vec<String>>> = dest_entries
+        .iter()
+        .map(|d| d.schemas_includes.clone())
+        .collect();
+
     drop(store);
 
     // Remove existing flow if it exists (e.g., if it was stopped)
@@ -241,6 +254,7 @@ pub async fn start_flow(
         &connector_entry.config,
         dest_configs,
         entry.batch_size,
+        dest_schema_filters,
     ) {
         Ok(f) => f,
         Err(e) => {
@@ -316,6 +330,12 @@ pub async fn restart_flow(
         .map(|d| (d.destination_type.as_str(), &d.config))
         .collect();
 
+    // Extract schema filters from destinations
+    let dest_schema_filters: Vec<Option<Vec<String>>> = dest_entries
+        .iter()
+        .map(|d| d.schemas_includes.clone())
+        .collect();
+
     drop(store);
 
     // Build flow
@@ -326,6 +346,7 @@ pub async fn restart_flow(
         &connector_entry.config,
         dest_configs,
         entry.batch_size,
+        dest_schema_filters,
     ) {
         Ok(f) => f,
         Err(e) => {
@@ -398,6 +419,12 @@ pub async fn resume_flow(
         .map(|d| (d.destination_type.as_str(), &d.config))
         .collect();
 
+    // Extract schema filters from destinations
+    let dest_schema_filters: Vec<Option<Vec<String>>> = dest_entries
+        .iter()
+        .map(|d| d.schemas_includes.clone())
+        .collect();
+
     drop(store);
 
     // Remove existing flow if it exists
@@ -411,6 +438,7 @@ pub async fn resume_flow(
         &connector_entry.config,
         dest_configs,
         entry.batch_size,
+        dest_schema_filters,
     ) {
         Ok(f) => f,
         Err(e) => {

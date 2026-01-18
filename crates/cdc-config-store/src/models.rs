@@ -64,6 +64,10 @@ pub struct DestinationConfigEntry {
     #[serde(default)]
     pub tags: Vec<String>,
 
+    /// Schemas to include for CDC operations
+    #[serde(default)]
+    pub schemas_includes: Option<Vec<String>>,
+
     /// When this config was created
     #[serde(default = "Utc::now")]
     pub created_at: DateTime<Utc>,
@@ -82,6 +86,7 @@ impl DestinationConfigEntry {
             config,
             description: None,
             tags: Vec::new(),
+            schemas_includes: None,
             created_at: now,
             updated_at: now,
         }
@@ -156,8 +161,9 @@ mod tests {
             "connector_type": "nats",
             "config": {"servers": ["nats://localhost:4222"]}
         });
-        
-        let entry: ConnectorConfigEntry = serde_json::from_value(json_data).expect("Failed to deserialize");
+
+        let entry: ConnectorConfigEntry =
+            serde_json::from_value(json_data).expect("Failed to deserialize");
         assert_eq!(entry.name, "test-connector");
         // These should be populated by Utc::now() during deserialization
         assert!(entry.created_at.timestamp() > 0);

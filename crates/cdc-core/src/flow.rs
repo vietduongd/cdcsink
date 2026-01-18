@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, Mutex, RwLock};
 use tokio::task::JoinHandle;
-use tracing::{error, info};
+use tracing::{debug, error, info, warn};
 
 /// Configuration structures for flows
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -114,6 +114,8 @@ pub struct Flow {
     destination_error_counters: Vec<u64>,
     error_threshold: u64,
     notifier: Arc<dyn Notifier>,
+    /// Schema filters for each destination (None or empty = allow all schemas)
+    destination_schema_filters: Vec<Option<Vec<String>>>,
 }
 
 impl Flow {
@@ -122,8 +124,16 @@ impl Flow {
         connector: Box<dyn Connector>,
         destinations: Vec<Box<dyn Destination>>,
         batch_size: usize,
+        destination_schema_filters: Vec<Option<Vec<String>>>,
     ) -> Self {
         let dest_count = destinations.len();
+        
+        // Log the configured schema filters for debugging
+        warn!(
+            "[{}] Initializing flow with {} destination(s) and schema filters: {:?}",
+            name, dest_count, destination_schema_filters
+        );
+        
         Self {
             name,
             connector,
@@ -136,6 +146,7 @@ impl Flow {
             destination_error_counters: vec![0; dest_count],
             error_threshold: 20, // Default threshold
             notifier: Arc::new(NoOpNotifier),
+            destination_schema_filters,
         }
     }
 
@@ -165,11 +176,15 @@ impl Flow {
             destinations.push(destination);
         }
 
+        // DestinationConfig doesn't have schemas_includes, so use empty filters
+        let schema_filters = vec![None; destinations.len()];
+
         Ok(Self::new(
             config.name,
             connector,
             destinations,
             config.batch_size,
+            schema_filters,
         ))
     }
 
@@ -277,13 +292,72 @@ impl Flow {
         let records = std::mem::take(&mut self.buffer);
         let count = records.len();
 
-        // Write to all destinations
+        // Write to all destinations with schema filtering
         for (idx, dest) in self.destinations.iter_mut().enumerate() {
-            match dest.write_batch(records.clone()).await {
+            // Filter records for this destination based on schemas_includes
+            // We need to do this inline to avoid borrow checker issues
+            let schema_filter = self.destination_schema_filters.get(idx);
+            
+            debug!(
+                "[{}] Destination {} schema filter: {:?}",
+                self.name, idx, schema_filter
+            );
+            
+            let filtered_records: Vec<_> = records
+                .iter()
+                .filter(|r| {
+                    let record_schema = &r.table_metadata.schema;
+                    
+                    // Check if this record should be sent to this destination
+                    if let Some(Some(schemas)) = schema_filter {
+                        if !schemas.is_empty() {
+                            // If record schema is empty, allow it
+                            if record_schema.is_empty() {
+                                debug!(
+                                    "[{}] Dest {}: Allowing record with empty schema (filter: {:?})",
+                                    self.name, idx, schemas
+                                );
+                                return true;
+                            }
+                            
+                            let should_send = schemas.contains(record_schema);
+                            debug!(
+                                "[{}] Dest {}: Record schema='{}', filter={:?}, allowed={}",
+                                self.name, idx, record_schema, schemas, should_send
+                            );
+                            return should_send;
+                        }
+                    }
+                    // No filter or empty filter = allow all
+                    debug!(
+                        "[{}] Dest {}: No filter or empty filter, allowing all schemas (record schema: '{}')",
+                        self.name, idx, record_schema
+                    );
+                    true
+                })
+                .cloned()
+                .collect();
+
+            // Skip if no records match this destination's schema filter
+            if filtered_records.is_empty() {
+                info!(
+                    "[{}] No records match schema filter for destination {} (filter: {:?})",
+                    self.name, idx, schema_filter
+                );
+                continue;
+            }
+
+            let filtered_count = filtered_records.len();
+            info!(
+                "[{}] Sending {}/{} records to destination {} (schema filter: {:?})",
+                self.name, filtered_count, count, idx, schema_filter
+            );
+
+            match dest.write_batch(filtered_records).await {
                 Ok(_) => {
                     info!(
                         "[{}] Flushed {} records to destination {}",
-                        self.name, count, idx
+                        self.name, filtered_count, idx
                     );
                     // Reset error counter on success
                     self.destination_error_counters[idx] = 0;
@@ -378,6 +452,7 @@ impl FlowBuilder {
         connector_config: &Value,
         destinations: Vec<(&str, &Value)>,
         batch_size: usize,
+        destination_schema_filters: Vec<Option<Vec<String>>>,
     ) -> Result<Flow> {
         // Create connector
         let connector_factory = self.registry.get_connector_factory(connector_type)?;
@@ -391,7 +466,13 @@ impl FlowBuilder {
             dest_instances.push(destination);
         }
 
-        Ok(Flow::new(name, connector, dest_instances, batch_size))
+        Ok(Flow::new(
+            name,
+            connector,
+            dest_instances,
+            batch_size,
+            destination_schema_filters,
+        ))
     }
 }
 

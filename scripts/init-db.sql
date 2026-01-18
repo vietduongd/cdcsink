@@ -45,6 +45,7 @@ CREATE TABLE IF NOT EXISTS destinations (
     config JSONB NOT NULL,
     description TEXT,
     tags TEXT[],
+    schemas_includes TEXT[],
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW()
 );

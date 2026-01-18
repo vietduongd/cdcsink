@@ -67,7 +67,7 @@ RUN useradd -m -u 1000 cdc \
     && chown -R cdc:cdc /var/lib/nginx
 
 # Expose API port
-EXPOSE 3000 8080
+EXPOSE 4000 8080
 
 # Default command - run as root to allow nginx to bind to port 80
 CMD ["/scripts/start.sh"]
