@@ -360,40 +360,6 @@ impl PostgresDestination {
         Ok(rows.into_iter().collect())
     }
 
-    /// Get cached schema from metadata table
-    async fn get_cached_schema(
-        &self,
-        pool: &PgPool,
-        table: &str,
-    ) -> Result<std::collections::HashMap<String, String>> {
-        let schema = Self::quote_identifier(&self.config.schema);
-        let query = format!(
-            "SELECT column_name, data_type 
-             FROM {}.\"_cdc_schema_metadata\" 
-             WHERE schema_name = $1 AND table_name = $2
-             ORDER BY column_name",
-            schema
-        );
-
-        let rows: Vec<(String, String)> = sqlx::query_as(&query)
-            .bind(&self.config.schema)
-            .bind(table)
-            .fetch_all(pool)
-            .await
-            .map_err(|e| Error::Generic(anyhow::anyhow!("Failed to get cached schema: {}", e)))?;
-
-        // If cache is empty, fallback to information_schema
-        if rows.is_empty() {
-            debug!(
-                "Cache miss for table {}, fetching from information_schema",
-                table
-            );
-            return self.get_table_schema(pool, table).await;
-        }
-
-        Ok(rows.into_iter().collect())
-    }
-
     /// Update schema metadata cache
     async fn update_schema_metadata(
         &self,
