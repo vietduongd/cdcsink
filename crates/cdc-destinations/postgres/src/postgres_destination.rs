@@ -1,7 +1,11 @@
 use async_trait::async_trait;
+use bytes::{BufMut, BytesMut};
 use cdc_core::{DataRecord, Destination, DestinationStatus, Error, Operation, Result};
+use futures::{pin_mut, SinkExt};
 use serde::{Deserialize, Serialize};
 use sqlx::postgres::{PgPool, PgPoolOptions};
+use std::sync::{Arc, RwLock};
+use tokio_postgres::{CopyInSink, NoTls};
 use tracing::{debug, error, info, warn};
 
 #[derive(Debug, Clone, Serialize)]
@@ -143,7 +147,13 @@ impl Default for PostgresConfig {
 pub struct PostgresDestination {
     config: PostgresConfig,
     pool: Option<PgPool>,
+    /// Raw tokio-postgres client for COPY operations
+    copy_client: Option<tokio_postgres::Client>,
     status: DestinationStatus,
+    /// Cache of table schemas to avoid repeated queries
+    /// Key: table_name, Value: HashMap<column_name, data_type>
+    schema_cache:
+        Arc<RwLock<std::collections::HashMap<String, std::collections::HashMap<String, String>>>>,
 }
 
 impl PostgresDestination {
@@ -151,7 +161,9 @@ impl PostgresDestination {
         Self {
             config,
             pool: None,
+            copy_client: None,
             status: DestinationStatus::default(),
+            schema_cache: Arc::new(RwLock::new(std::collections::HashMap::new())),
         }
     }
 
@@ -299,6 +311,34 @@ impl PostgresDestination {
         Ok(exists.0)
     }
 
+    /// Get or fetch table schema from cache
+    async fn get_or_fetch_table_schema(
+        &self,
+        pool: &PgPool,
+        table: &str,
+    ) -> Result<std::collections::HashMap<String, String>> {
+        // Check cache first
+        {
+            let cache = self.schema_cache.read().unwrap();
+            if let Some(schema) = cache.get(table) {
+                debug!("Using cached schema for table '{}'", table);
+                return Ok(schema.clone());
+            }
+        }
+
+        // Not in cache, fetch from database
+        debug!("Fetching schema for table '{}' from database", table);
+        let schema = self.get_table_schema(pool, table).await?;
+
+        // Store in cache
+        {
+            let mut cache = self.schema_cache.write().unwrap();
+            cache.insert(table.to_string(), schema.clone());
+        }
+
+        Ok(schema)
+    }
+
     /// Get current table schema from information_schema
     async fn get_table_schema(
         &self,
@@ -432,8 +472,8 @@ impl PostgresDestination {
                     .map(|cs| cs.nullable)
                     .unwrap_or(true) // Default to nullable if not found
             } else {
-                // If no metadata, check if current value is null
-                col_value.is_null()
+                // If no metadata, default to nullable to avoid constraint violations
+                true
             };
 
             // Check for id column (case-insensitive) to set as PRIMARY KEY
@@ -613,8 +653,10 @@ impl PostgresDestination {
                 // self.apply_default_values(pool, &table_name_str, &mut final_data)
                 //     .await?;
 
-                // Get table schema to know column types
-                let table_schema = self.get_table_schema(pool, &table_name_str).await?;
+                // Get table schema to know column types (uses cache)
+                let table_schema = self
+                    .get_or_fetch_table_schema(pool, &table_name_str)
+                    .await?;
 
                 // Extract column names and values
                 let mut columns = Vec::new();
@@ -714,90 +756,6 @@ impl PostgresDestination {
     }
 
     /// Apply default values for NULL or empty fields based on actual column types from schema
-    async fn apply_default_values(
-        &self,
-        pool: &PgPool,
-        table: &str,
-        data: &mut std::collections::HashMap<String, serde_json::Value>,
-    ) -> Result<()> {
-        // Fetch schema from metadata cache
-        let schema = self.get_cached_schema(pool, table).await?;
-
-        let keys: Vec<String> = data.keys().cloned().collect();
-
-        for key in keys {
-            let value = data.get(&key).unwrap();
-
-            // Determine if we should apply defaults
-            let needs_default = value.is_null()
-                || (value.is_string() && value.as_str().unwrap_or("").trim().is_empty());
-
-            if !needs_default {
-                continue;
-            }
-
-            // Get column type from schema
-            let column_type = schema.get(&key);
-
-            if let Some(data_type) = column_type {
-                // Use actual data type to generate default
-                let default_value = Self::get_default_value_for_type(data_type);
-                info!(
-                    "Applying default for column '{}' (type: {}): {}",
-                    key, data_type, default_value
-                );
-                data.insert(key.clone(), default_value);
-            } else {
-                // Column not in schema, use heuristic fallback
-                warn!(
-                    "Column '{}' not found in schema, using heuristic default",
-                    key
-                );
-                let default_value =
-                    if key.to_lowercase().ends_with("id") || key.to_lowercase().ends_with("by") {
-                        let uuid = sqlx::types::Uuid::new_v4();
-                        serde_json::Value::String(uuid.to_string())
-                    } else {
-                        serde_json::Value::String(String::new())
-                    };
-                data.insert(key.clone(), default_value);
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Get default value for a PostgreSQL data type
-    fn get_default_value_for_type(data_type: &str) -> serde_json::Value {
-        match data_type.to_lowercase().as_str() {
-            "uuid" => {
-                let uuid = sqlx::types::Uuid::new_v4();
-                serde_json::Value::String(uuid.to_string())
-            }
-            "integer" | "int" | "int4" | "smallint" | "int2" => {
-                serde_json::Value::Number(serde_json::Number::from(0))
-            }
-            "bigint" | "int8" => serde_json::Value::Number(serde_json::Number::from(0i64)),
-            "real" | "float4" | "double precision" | "float8" | "numeric" | "decimal" => {
-                serde_json::Value::Number(serde_json::Number::from_f64(0.0).unwrap())
-            }
-            "boolean" | "bool" => serde_json::Value::Bool(false),
-            "text" | "varchar" | "character varying" | "char" | "character" => {
-                serde_json::Value::String(String::new())
-            }
-            "jsonb" | "json" => serde_json::json!({}),
-            "timestamp"
-            | "timestamptz"
-            | "timestamp with time zone"
-            | "timestamp without time zone"
-            | "date"
-            | "time" => serde_json::Value::Null,
-            _ => {
-                // Default to empty string for unknown types
-                serde_json::Value::String(String::new())
-            }
-        }
-    }
 
     async fn execute_query_with_schema<'e, E>(
         &self,
@@ -816,7 +774,7 @@ impl PostgresDestination {
             let column_name = column_names.get(idx).map(|s| s.as_str()).unwrap_or("");
             let column_type = table_schema.get(column_name).map(|s| s.as_str());
 
-            info!(
+            debug!(
                 "Binding value for column '{}' (type: {:?}): {}",
                 column_name, column_type, value
             );
@@ -1083,6 +1041,170 @@ impl PostgresDestination {
 
         Ok(())
     }
+
+    /// Escape special characters for PostgreSQL COPY text format
+    fn escape_copy_value(s: &str) -> String {
+        s.replace('\\', "\\\\")
+            .replace('\t', "\\t")
+            .replace('\n', "\\n")
+            .replace('\r', "\\r")
+    }
+
+    /// Format a JSON value for PostgreSQL COPY text format
+    fn format_value_for_copy(value: &serde_json::Value) -> String {
+        match value {
+            serde_json::Value::Null => "\\N".to_string(),
+            serde_json::Value::Bool(b) => if *b { "t" } else { "f" }.to_string(),
+            serde_json::Value::Number(n) => n.to_string(),
+            serde_json::Value::String(s) => {
+                if s.is_empty() || s.trim().eq_ignore_ascii_case("null") {
+                    "\\N".to_string()
+                } else {
+                    Self::escape_copy_value(s)
+                }
+            }
+            serde_json::Value::Array(_) | serde_json::Value::Object(_) => {
+                // For JSON values, serialize and escape
+                let json_str = value.to_string();
+                Self::escape_copy_value(&json_str)
+            }
+        }
+    }
+
+    /// Bulk write using PostgreSQL COPY protocol for maximum performance
+    /// Returns the number of records successfully written
+    async fn write_batch_copy(
+        &self,
+        client: &tokio_postgres::Client,
+        table_name: &str,
+        records: &[&DataRecord],
+    ) -> Result<u64> {
+        if records.is_empty() {
+            return Ok(0);
+        }
+
+        // Get columns from first record to ensure consistent ordering
+        let first_data = records[0]
+            .parse_record()
+            .map_err(|e| Error::Generic(anyhow::anyhow!("Failed to parse record: {}", e)))?;
+
+        let columns: Vec<String> = first_data.keys().cloned().collect();
+        let columns_quoted: Vec<String> =
+            columns.iter().map(|c| Self::quote_identifier(c)).collect();
+
+        let schema = Self::quote_identifier(&self.config.schema);
+        let table = Self::quote_identifier(table_name);
+
+        // Build COPY statement
+        let copy_stmt = format!(
+            "COPY {}.{} ({}) FROM STDIN WITH (FORMAT text, NULL '\\N')",
+            schema,
+            table,
+            columns_quoted.join(", ")
+        );
+
+        debug!("Starting COPY for table {}: {}", table_name, copy_stmt);
+
+        // Start COPY operation
+        let sink: CopyInSink<bytes::Bytes> = client
+            .copy_in(&copy_stmt)
+            .await
+            .map_err(|e| Error::Generic(anyhow::anyhow!("Failed to start COPY: {}", e)))?;
+
+        pin_mut!(sink);
+
+        let mut count = 0u64;
+        let mut buffer = BytesMut::with_capacity(8192);
+
+        for record in records {
+            let data = record
+                .parse_record()
+                .map_err(|e| Error::Generic(anyhow::anyhow!("Failed to parse record: {}", e)))?;
+
+            // Build row line: column values separated by tabs, ending with newline
+            let row_values: Vec<String> = columns
+                .iter()
+                .map(|col| {
+                    data.get(col)
+                        .map(Self::format_value_for_copy)
+                        .unwrap_or_else(|| "\\N".to_string())
+                })
+                .collect();
+
+            let line = format!("{}\n", row_values.join("\t"));
+            buffer.put_slice(line.as_bytes());
+
+            // Flush buffer periodically to avoid memory issues
+            if buffer.len() >= 65536 {
+                sink.send(buffer.split().freeze()).await.map_err(|e| {
+                    Error::Generic(anyhow::anyhow!("Failed to send COPY data: {}", e))
+                })?;
+            }
+
+            count += 1;
+        }
+
+        // Send remaining data
+        if !buffer.is_empty() {
+            sink.send(buffer.freeze())
+                .await
+                .map_err(|e| Error::Generic(anyhow::anyhow!("Failed to send COPY data: {}", e)))?;
+        }
+
+        // Finish COPY operation
+        let rows_affected = sink
+            .finish()
+            .await
+            .map_err(|e| Error::Generic(anyhow::anyhow!("Failed to finish COPY: {}", e)))?;
+
+        info!(
+            "COPY completed for table {}: {} records (reported: {})",
+            table_name, count, rows_affected
+        );
+
+        Ok(count)
+    }
+
+    /// Fallback method: write records individually using transaction
+    async fn write_batch_individual(&mut self, records: &[&DataRecord]) -> Result<()> {
+        let pool = self
+            .pool
+            .as_ref()
+            .ok_or_else(|| Error::Connection("Not connected".to_string()))?;
+
+        let mut transaction = pool
+            .begin()
+            .await
+            .map_err(|e| Error::Generic(anyhow::anyhow!("Failed to begin transaction: {}", e)))?;
+
+        for record in records {
+            if let Err(e) = self.insert_record(&mut *transaction, record).await {
+                let table_name = record.table_name().unwrap_or_else(|| "unknown".to_string());
+                let operation = record.operation();
+                error!(
+                    "Failed to write record to table '{}' (operation: {:?}): {}",
+                    table_name, operation, e
+                );
+                self.status.errors += 1;
+                self.status.last_error = Some(e.to_string());
+
+                transaction
+                    .rollback()
+                    .await
+                    .map_err(|e| Error::Generic(anyhow::anyhow!("Failed to rollback: {}", e)))?;
+
+                return Err(e);
+            }
+            self.status.records_written += 1;
+        }
+
+        transaction
+            .commit()
+            .await
+            .map_err(|e| Error::Generic(anyhow::anyhow!("Failed to commit transaction: {}", e)))?;
+
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -1096,7 +1218,28 @@ impl Destination for PostgresDestination {
             .await
             .map_err(|e| Error::Connection(format!("Failed to connect to PostgreSQL: {}", e)))?;
 
-        info!("Connected to PostgreSQL successfully");
+        info!("Connected to PostgreSQL successfully (sqlx pool)");
+
+        // Also create a raw tokio-postgres connection for COPY operations
+        match tokio_postgres::connect(&self.config.url, NoTls).await {
+            Ok((client, connection)) => {
+                // Spawn connection handler in background
+                tokio::spawn(async move {
+                    if let Err(e) = connection.await {
+                        error!("tokio-postgres connection error: {}", e);
+                    }
+                });
+                self.copy_client = Some(client);
+                info!("Connected tokio-postgres client for COPY operations");
+            }
+            Err(e) => {
+                warn!(
+                    "Failed to create tokio-postgres client for COPY, will use fallback: {}",
+                    e
+                );
+                // Continue without COPY support - will fallback to individual inserts
+            }
+        }
 
         // Ensure schema metadata table exists
         self.ensure_schema_metadata_table(&pool).await?;
@@ -1109,6 +1252,12 @@ impl Destination for PostgresDestination {
 
     async fn disconnect(&mut self) -> Result<()> {
         info!("Disconnecting from PostgreSQL");
+
+        // Close COPY client
+        if let Some(_client) = self.copy_client.take() {
+            info!("Closed tokio-postgres client");
+            // Client will be dropped, connection task will end
+        }
 
         if let Some(pool) = self.pool.take() {
             pool.close().await;
@@ -1148,10 +1297,30 @@ impl Destination for PostgresDestination {
     }
 
     async fn write_batch(&mut self, records: Vec<DataRecord>) -> Result<()> {
+        if records.is_empty() {
+            return Ok(());
+        }
+
         let pool = self
             .pool
             .as_ref()
             .ok_or_else(|| Error::Connection("Not connected".to_string()))?;
+
+        // Group records by table and separate deletes (COPY doesn't support deletes)
+        let mut table_groups: std::collections::HashMap<String, Vec<&DataRecord>> =
+            std::collections::HashMap::new();
+        let mut delete_records: Vec<&DataRecord> = Vec::new();
+
+        for record in &records {
+            if record.operation() == Operation::Delete {
+                delete_records.push(record);
+            } else if let Some(table_name) = record.table_name() {
+                table_groups
+                    .entry(table_name)
+                    .or_insert_with(Vec::new)
+                    .push(record);
+            }
+        }
 
         // Ensure all unique tables exist before processing batch
         let mut processed_tables = std::collections::HashSet::new();
@@ -1164,38 +1333,80 @@ impl Destination for PostgresDestination {
             }
         }
 
-        let mut transaction = pool
-            .begin()
-            .await
-            .map_err(|e| Error::Generic(anyhow::anyhow!("Failed to begin transaction: {}", e)))?;
+        // Process insert/update/read operations using COPY or fallback
+        let copy_threshold = 5; // Use COPY for batches >= this size
+        let has_copy_client = self.copy_client.is_some();
 
-        for record in &records {
-            if let Err(e) = self.insert_record(&mut *transaction, record).await {
-                let table_name = record.table_name().unwrap_or_else(|| "unknown".to_string());
-                let operation = record.operation();
-                error!(
-                    "Failed to write record to table '{}' (operation: {:?}): {}",
-                    table_name, operation, e
-                );
-                self.status.errors += 1;
-                self.status.last_error = Some(e.to_string());
-
-                transaction
-                    .rollback()
+        for (table_name, table_records) in &table_groups {
+            if has_copy_client && table_records.len() >= copy_threshold {
+                // Use COPY for larger batches
+                let client = self.copy_client.as_ref().unwrap();
+                match self
+                    .write_batch_copy(client, &table_name, table_records)
                     .await
-                    .map_err(|e| Error::Generic(anyhow::anyhow!("Failed to rollback: {}", e)))?;
-
-                return Err(e);
+                {
+                    Ok(count) => {
+                        self.status.records_written += count;
+                        info!(
+                            "COPY inserted {} records into {} (batch size: {})",
+                            count,
+                            table_name,
+                            table_records.len()
+                        );
+                    }
+                    Err(e) => {
+                        warn!(
+                            "COPY failed for table {}, falling back to individual inserts: {}",
+                            table_name, e
+                        );
+                        // Fallback to individual inserts
+                        self.write_batch_individual(table_records).await?;
+                    }
+                }
+            } else {
+                // Small batch or no COPY client - use individual inserts
+                if !has_copy_client {
+                    debug!("Using individual inserts (no COPY client)");
+                } else {
+                    debug!(
+                        "Using individual inserts for {} ({} records < threshold {})",
+                        table_name,
+                        table_records.len(),
+                        copy_threshold
+                    );
+                }
+                self.write_batch_individual(table_records).await?;
             }
         }
 
-        transaction
-            .commit()
-            .await
-            .map_err(|e| Error::Generic(anyhow::anyhow!("Failed to commit transaction: {}", e)))?;
+        // Handle DELETE operations individually (COPY doesn't support deletes)
+        if !delete_records.is_empty() {
+            debug!(
+                "Processing {} DELETE operations individually",
+                delete_records.len()
+            );
+            let pool = self
+                .pool
+                .as_ref()
+                .ok_or_else(|| Error::Connection("Not connected".to_string()))?;
 
-        self.status.records_written += records.len() as u64;
-        info!("Successfully wrote batch of {} records", records.len());
+            for record in &delete_records {
+                if let Err(e) = self.insert_record(pool, record).await {
+                    let table_name = record.table_name().unwrap_or_else(|| "unknown".to_string());
+                    error!("Failed to delete record from table '{}': {}", table_name, e);
+                    self.status.errors += 1;
+                    self.status.last_error = Some(e.to_string());
+                    return Err(e);
+                }
+                self.status.records_written += 1;
+            }
+        }
+
+        info!(
+            "Successfully processed batch of {} records (COPY threshold: {})",
+            records.len(),
+            copy_threshold
+        );
 
         Ok(())
     }
