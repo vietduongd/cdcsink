@@ -208,8 +208,8 @@ impl Connector for NatsConnector {
                 let record = match serde_json::from_str::<DataRecord>(payload_str) {
                     Ok(r) => {
                         info!(
-                            "Successfully parsed DataRecord: table={:?}, action={}",
-                            r.table_metadata.name, r.operation
+                            "Successfully parsed DataRecord: table={:?}",
+                            r.schema_name()
                         );
                         r
                     }

@@ -1,0 +1,14 @@
+- name: '234234'
+  destination_type: postgres
+  config:
+    database: data-from-nats
+    host: localhost
+    password: Nintendo123
+    port: 5432
+    username: postgres
+  description: ''
+  tags: []
+  schemas_includes:
+  - public
+  created_at: 2026-02-02T12:24:13.662513100Z
+  updated_at: 2026-02-02T12:24:13.662513200Z

@@ -1,15 +1,7 @@
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::collections::HashMap;
 
-use base64::{prelude::BASE64_STANDARD, Engine};
-use chrono::{DateTime, Utc};
-use etl::types::{Cell, PgNumeric};
-use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
-use uuid::Uuid;
-
-use crate::Result;
-
-/// CDC Operation types
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum Operation {
@@ -20,165 +12,152 @@ pub enum Operation {
     Snapshot,
 }
 
-impl Operation {
-    /// Parse operation from string (case-insensitive)
-    pub fn from_str(s: &str) -> Self {
-        match s.to_lowercase().as_str() {
-            "insert" => Operation::Insert,
-            "update" => Operation::Update,
-            "delete" => Operation::Delete,
-            "read" => Operation::Read,
-            "snapshot" => Operation::Snapshot,
-            _ => Operation::Read, // Default fallback
-        }
-    }
-}
-
-impl std::fmt::Display for Operation {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Operation::Insert => write!(f, "insert"),
-            Operation::Update => write!(f, "update"),
-            Operation::Delete => write!(f, "delete"),
-            Operation::Read => write!(f, "read"),
-            Operation::Snapshot => write!(f, "snapshot"),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ColumnSchemaSer {
-    pub name: String,
-    pub typ: String,
-    pub modifier: i32,
-    pub nullable: bool,
-    pub primary: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct TableMetadata {
-    pub schema: String,
-    pub name: String,
-    pub column_schemas: Vec<ColumnSchemaSer>,
-}
-
-impl TableMetadata {
-    pub fn init() -> Self {
-        Self::default()
-    }
-
-    pub fn add_column_schema(&mut self, column_schema: ColumnSchemaSer) {
-        self.column_schemas.push(column_schema);
-    }
-
-    pub fn update_table_name(&mut self, schema: String, name: String) {
-        self.schema = schema;
-        self.name = name;
-    }
-}
-
+/// ===== Root =====
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DataRecord {
-    /// Unique identifier for this record
-    id: Uuid,
+    pub schema: Schema,
+    pub payload: Payload,
+}
 
-    /// Timestamp when the event occurred
-    timestamp: DateTime<Utc>,
+/// ===== Schema (ít khi dùng, nhưng vẫn map đầy đủ) =====
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Schema {
+    #[serde(rename = "type")]
+    pub schema_type: String,
+    pub fields: Vec<SchemaField>,
+    pub optional: bool,
+    pub name: String,
+    pub version: i32,
+}
 
-    /// The actual data payload
-    pub data: HashMap<String, serde_json::Value>,
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SchemaField {
+    #[serde(rename = "type")]
+    pub field_type: String,
+    pub optional: bool,
 
-    /// Table metadata (schema structure)
-    pub table_metadata: TableMetadata,
+    #[serde(default)]
+    pub field: Option<String>,
 
-    /// CDC operation type
-    pub operation: String,
+    #[serde(default)]
+    pub name: Option<String>,
+
+    #[serde(default)]
+    pub version: Option<i32>,
+
+    #[serde(default)]
+    pub fields: Option<Vec<SchemaField>>,
+
+    #[serde(default)]
+    pub default: Option<serde_json::Value>,
+
+    #[serde(default)]
+    pub parameters: Option<serde_json::Value>,
+}
+
+/// ===== Payload =====
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Payload {
+    pub before: Option<HashMap<String, Value>>,
+    pub after: Option<HashMap<String, Value>>,
+    pub source: Source,
+    pub transaction: Option<Transaction>,
+    pub op: String,
+
+    #[serde(rename = "ts_ms")]
+    pub ts_ms: Option<i64>,
+    #[serde(rename = "ts_us")]
+    pub ts_us: Option<i64>,
+    #[serde(rename = "ts_ns")]
+    pub ts_ns: Option<i64>,
+}
+
+/// ===== Source =====
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Source {
+    pub version: String,
+    pub connector: String,
+    pub name: String,
+
+    #[serde(rename = "ts_ms")]
+    pub ts_ms: i64,
+
+    pub snapshot: String,
+    pub db: String,
+
+    pub sequence: Option<String>,
+
+    #[serde(rename = "ts_us")]
+    pub ts_us: Option<i64>,
+    #[serde(rename = "ts_ns")]
+    pub ts_ns: Option<i64>,
+
+    pub schema: String,
+    pub table: String,
+
+    #[serde(rename = "txId")]
+    pub tx_id: Option<i64>,
+    pub lsn: Option<i64>,
+    pub xmin: Option<i64>,
+}
+
+/// ===== Transaction =====
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Transaction {
+    pub id: String,
+
+    #[serde(rename = "total_order")]
+    pub total_order: i64,
+
+    #[serde(rename = "data_collection_order")]
+    pub data_collection_order: i64,
 }
 
 impl DataRecord {
-    pub fn new() -> Self {
-        Self {
-            id: Uuid::now_v7(),
-            timestamp: Utc::now(),
-            data: HashMap::new(),
-            table_metadata: TableMetadata::init(),
-            operation: String::new(),
-        }
-    }
 
-    pub fn init(table_metadata: TableMetadata, operation: String) -> Self {
-        Self {
-            id: Uuid::now_v7(),
-            timestamp: Utc::now(),
-            data: HashMap::new(),
-            table_metadata: table_metadata,
-            operation,
-        }
-    }
-
-    pub fn add_column(&mut self, column_name: String, column_value: serde_json::Value) {
-        self.data.insert(column_name, column_value);
-    }
-
-    pub fn get_info(&mut self) -> &mut Self {
-        self
-    }
-
-    /// Get table name from metadata
-    pub fn table_name(&self) -> Option<String> {
-        if self.table_metadata.name.is_empty() {
-            None
-        } else {
-            Some(self.table_metadata.name.clone())
-        }
-    }
-
-    /// Get operation type
-    pub fn operation(&self) -> Operation {
-        Operation::from_str(&self.operation)
-    }
-
-    /// Parse record data (returns the data HashMap)
-    pub fn parse_record(&self) -> Result<HashMap<String, serde_json::Value>> {
-        Ok(self.data.clone())
-    }
-
-    /// Parse changes (for update operations, returns None as we don't track changes separately)
-    pub fn parse_changes(&self) -> Result<Option<HashMap<String, serde_json::Value>>> {
-        // We don't have a separate changes field, so return None
-        // The data field contains the full record
-        Ok(None)
-    }
-
-    pub fn value_cell_to_json(source: &Cell) -> Value {
-        match source {
-            Cell::Null => Value::Null,
-            Cell::Bool(v) => Value::Bool(*v),
-            Cell::String(v) => Value::String(v.clone()),
-            Cell::I16(v) => json!(*v),
-            Cell::I32(v) => json!(*v),
-            Cell::U32(v) => json!(*v),
-            Cell::I64(v) => json!(*v),
-            Cell::F32(v) => json!(*v),
-            Cell::F64(v) => json!(*v),
-
-            Cell::Numeric(num) => match num {
-                PgNumeric::NaN => Value::Null,
-                _ => json!(num.to_string()),
-            },
-
-            Cell::Date(v) => json!(v.to_string()), // "2026-01-14"
-            Cell::Time(v) => json!(v.to_string()), // "12:34:56"
-            Cell::Timestamp(v) => json!(v.to_string()), // "2026-01-14T12:34:56"
-            Cell::TimestampTz(v) => json!(v.to_rfc3339()), // "2026-01-14T12:34:56Z"
-            Cell::Uuid(v) => json!(v.to_string()),
-            Cell::Json(v) => v.clone(),
-            Cell::Bytes(v) => {
-                // Encode base64
-                json!(BASE64_STANDARD.encode(v.clone()))
+    pub fn parse_record(&self) -> Result<HashMap<String, Value>, String> {
+        match self.payload.op.as_str() {
+            "c" | "r" | "u" => {
+                if let Some(after) = &self.payload.after {
+                    Ok(after.clone())
+                } else {
+                    Err("No 'after' data for create/read/update operation".to_string())
+                }
             }
+            "d" => {
+                if let Some(before) = &self.payload.before {
+                    Ok(before.clone())
+                } else {
+                    Err("No 'before' data for delete operation".to_string())
+                }
+            }
+            _ => Err(format!("Unknown operation type: {}", self.payload.op)),
+        }
+    }
 
-            Cell::Array(_arr) => json!("demo".to_string()),
+    /// Get the table name from source metadata
+    pub fn table_name(&self) -> Option<String> {
+        Some(self.payload.source.table.clone())
+    }
+
+    /// Get the database name from source metadata
+    pub fn database_name(&self) -> Option<String> {
+        Some(self.payload.source.db.clone())
+    }
+
+    /// Get the schema name from source metadata
+    pub fn schema_name(&self) -> Option<String> {
+        Some(self.payload.source.schema.clone())
+    }
+
+    pub fn operation(&self) -> Operation {
+        match self.payload.op.as_str() {
+            "c" => Operation::Insert,
+            "r" => Operation::Read,
+            "u" => Operation::Update,
+            "d" => Operation::Delete,
+            "snapshot" => Operation::Snapshot,
+            _ => Operation::Snapshot, // Default fallback or handle unknown operation
         }
     }
 }

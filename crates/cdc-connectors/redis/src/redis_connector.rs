@@ -137,50 +137,23 @@ impl RedisConnector {
         }
     }
 
-    /// Parse Redis stream entry into DataRecord
+    /// Parse Redis stream entry into DataRecord (Debezium format)
     fn parse_stream_entry(entry: &redis::streams::StreamId) -> Result<DataRecord> {
         let map = &entry.map;
 
-        // Extract fields from stream entry
-        let record_str = map
-            .get("record")
+        // Extract the complete Debezium event from stream entry
+        // The event should be stored as a JSON string in the 'event' field
+        let event_str = map
+            .get("event")
             .and_then(|v| match v {
                 redis::Value::Data(bytes) => String::from_utf8(bytes.clone()).ok(),
                 _ => None,
             })
-            .ok_or_else(|| Error::Generic(anyhow::anyhow!("Missing 'record' field")))?;
+            .ok_or_else(|| Error::Generic(anyhow::anyhow!("Missing 'event' field in Redis stream")))?;
 
-        let metadata_str = map
-            .get("metadata")
-            .and_then(|v| match v {
-                redis::Value::Data(bytes) => String::from_utf8(bytes.clone()).ok(),
-                _ => None,
-            })
-            .ok_or_else(|| Error::Generic(anyhow::anyhow!("Missing 'metadata' field")))?;
-
-        let action = map
-            .get("action")
-            .and_then(|v| match v {
-                redis::Value::Data(bytes) => String::from_utf8(bytes.clone()).ok(),
-                _ => None,
-            })
-            .ok_or_else(|| Error::Generic(anyhow::anyhow!("Missing 'action' field")))?;
-
-        // Parse metadata as TableMetadata
-        let table_metadata: cdc_core::TableMetadata =
-            serde_json::from_str(&metadata_str).map_err(|e| Error::Serialization(e))?;
-
-        // Parse record data as HashMap
-        let data: std::collections::HashMap<String, serde_json::Value> =
-            serde_json::from_str(&record_str).map_err(|e| Error::Serialization(e))?;
-
-        // Create DataRecord with the parsed metadata and operation
-        let mut record = DataRecord::init(table_metadata, action);
-
-        // Add all data fields
-        for (key, value) in data {
-            record.add_column(key, value);
-        }
+        // Parse the complete Debezium event
+        let record: DataRecord = serde_json::from_str(&event_str)
+            .map_err(|e| Error::Serialization(e))?;
 
         Ok(record)
     }

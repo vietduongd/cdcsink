@@ -7,6 +7,7 @@ use sqlx::postgres::{PgPool, PgPoolOptions};
 use std::sync::{Arc, RwLock};
 use tokio_postgres::{CopyInSink, NoTls};
 use tracing::{debug, error, info, warn};
+use crate::type_mapping::TypeMapping;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct PostgresConfig {
@@ -32,6 +33,10 @@ pub struct PostgresConfig {
     /// Automatically add columns if they don't exist
     #[serde(default = "default_auto_add_columns")]
     pub auto_add_columns: bool,
+
+    /// Type mapping configuration for Debezium to PostgreSQL
+    #[serde(default)]
+    pub type_mapping: TypeMapping,
 }
 
 fn default_max_connections() -> u32 {
@@ -115,6 +120,7 @@ impl<'de> Deserialize<'de> for PostgresConfig {
             conflict_resolution: helper.conflict_resolution,
             auto_create_tables: helper.auto_create_tables,
             auto_add_columns: helper.auto_add_columns,
+            type_mapping: TypeMapping::default(),
         })
     }
 }
@@ -140,6 +146,7 @@ impl Default for PostgresConfig {
             conflict_resolution: ConflictResolution::Upsert,
             auto_create_tables: true,
             auto_add_columns: true,
+            type_mapping: TypeMapping::default(),
         }
     }
 }
@@ -177,58 +184,11 @@ impl PostgresDestination {
         }
     }
 
-    /// Map etl::types type string to PostgreSQL type
-    fn map_etl_type_to_postgres(etl_type: &str) -> String {
-        match etl_type.to_lowercase().as_str() {
-            "bool" => "BOOLEAN".to_string(),
-            "int2" | "smallint" => "SMALLINT".to_string(),
-            "int4" | "integer" | "int" => "INTEGER".to_string(),
-            "int8" | "bigint" => "BIGINT".to_string(),
-            "float4" | "real" => "REAL".to_string(),
-            "float8" | "double precision" => "DOUBLE PRECISION".to_string(),
-            "numeric" | "decimal" => "NUMERIC".to_string(),
-            "text" => "TEXT".to_string(),
-            "varchar" | "character varying" => "VARCHAR".to_string(),
-            "char" | "character" => "CHAR".to_string(),
-            "uuid" => "UUID".to_string(),
-            "json" => "JSON".to_string(),
-            "jsonb" => "JSONB".to_string(),
-            "bytea" => "BYTEA".to_string(),
-            "date" => "DATE".to_string(),
-            "time" => "TIME".to_string(),
-            "timestamp" => "TIMESTAMP".to_string(),
-            "timestamptz" | "timestamp with time zone" => "TIMESTAMP WITH TIME ZONE".to_string(),
-            _ => "TEXT".to_string(), // Default fallback
-        }
-    }
-
-    /// Infer PostgreSQL type from JSON value and table metadata
+    /// Infer PostgreSQL type from JSON value
     fn infer_postgres_type(
-        column_name: &str,
+        _column_name: &str,
         value: &serde_json::Value,
-        table_metadata: Option<&cdc_core::TableMetadata>,
     ) -> String {
-        // First, try to get type from table_metadata if available
-        if let Some(metadata) = table_metadata {
-            if let Some(column_schema) = metadata
-                .column_schemas
-                .iter()
-                .find(|cs| cs.name == column_name)
-            {
-                // Found column schema, use the type from metadata
-                info!(
-                    "Using type from metadata for column '{}': {}",
-                    column_name, column_schema.typ
-                );
-                return Self::map_etl_type_to_postgres(&column_schema.typ);
-            }
-        }
-
-        // Fallback: infer from JSON value if metadata not available
-        info!(
-            "Inferring type from value for column '{}' (metadata not available)",
-            column_name
-        );
         match value {
             serde_json::Value::Null => "TEXT".to_string(),
             serde_json::Value::Bool(_) => "BOOLEAN".to_string(),
@@ -410,13 +370,12 @@ impl PostgresDestination {
         Ok(())
     }
 
-    /// Create a new table with columns inferred from data and metadata
+    /// Create a new table with columns inferred from data
     async fn create_table(
         &self,
         pool: &PgPool,
         table: &str,
         data: &std::collections::HashMap<String, serde_json::Value>,
-        table_metadata: Option<&cdc_core::TableMetadata>,
     ) -> Result<()> {
         let schema = Self::quote_identifier(&self.config.schema);
         let table_quoted = Self::quote_identifier(table);
@@ -426,21 +385,11 @@ impl PostgresDestination {
         let mut column_types = std::collections::HashMap::new();
 
         for (col_name, col_value) in data {
-            let col_type = Self::infer_postgres_type(col_name, col_value, table_metadata);
+            let col_type = Self::infer_postgres_type(col_name, col_value);
             let col_quoted = Self::quote_identifier(col_name);
 
-            // Check if column is nullable from metadata
-            let is_nullable = if let Some(metadata) = table_metadata {
-                metadata
-                    .column_schemas
-                    .iter()
-                    .find(|cs| cs.name.as_str() == col_name)
-                    .map(|cs| cs.nullable)
-                    .unwrap_or(true) // Default to nullable if not found
-            } else {
-                // If no metadata, default to nullable to avoid constraint violations
-                true
-            };
+            // Default to nullable to avoid constraint violations
+            let is_nullable = true;
 
             // Check for id column (case-insensitive) to set as PRIMARY KEY
             if col_name.to_lowercase() == "id" {
@@ -516,8 +465,12 @@ impl PostgresDestination {
 
     /// Ensure table exists and has all required columns
     async fn ensure_table_exists(&self, pool: &PgPool, record: &DataRecord) -> Result<()> {
-        let table = &record.table_metadata.name;
-        let schema = &record.table_metadata.schema;
+        let table = record.table_name().ok_or_else(|| {
+            Error::Generic(anyhow::anyhow!("No table_name in metadata"))
+        })?;
+        let schema = record.schema_name().ok_or_else(|| {
+            Error::Generic(anyhow::anyhow!("No schema_name in metadata"))
+        })?;
         if table.is_empty() || schema.is_empty() {
             return Err(Error::Generic(anyhow::anyhow!(
                 "No table_name or schema in metadata"
@@ -536,7 +489,7 @@ impl PostgresDestination {
             // Table doesn't exist
             if self.config.auto_create_tables {
                 info!("Table {} does not exist, creating it", table);
-                self.create_table(pool, &table, &data, Some(&record.table_metadata))
+                self.create_table(pool, &table, &data)
                     .await?;
             } else {
                 return Err(Error::Generic(anyhow::anyhow!(
@@ -555,7 +508,6 @@ impl PostgresDestination {
                         let col_type = Self::infer_postgres_type(
                             col_name,
                             col_value,
-                            Some(&record.table_metadata),
                         );
                         missing_columns.push((col_name.clone(), col_type));
                     }
@@ -597,19 +549,9 @@ impl PostgresDestination {
         match operation {
             Operation::Insert | Operation::Snapshot | Operation::Update | Operation::Read => {
                 // For all operations, use INSERT ON CONFLICT
-                // For UPDATE, we'll merge changes into the full record
+                // Use the data from after field (already parsed by parse_record)
 
-                let mut final_data = data.clone();
-
-                // If it's an UPDATE, merge changes
-                if matches!(operation, Operation::Update) {
-                    if let Ok(Some(changes)) = record.parse_changes() {
-                        info!("Merging {} changed fields for UPDATE", changes.len());
-                        for (key, value) in changes {
-                            final_data.insert(key, value);
-                        }
-                    }
-                }
+                let final_data = data;
 
                 // Apply default values for NULL/empty fields using schema metadata
                 let pool = self

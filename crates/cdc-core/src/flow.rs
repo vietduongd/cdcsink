@@ -306,7 +306,7 @@ impl Flow {
             let filtered_records: Vec<_> = records
                 .iter()
                 .filter(|r| {
-                    let record_schema = &r.table_metadata.schema;
+                    let record_schema = &r.schema_name().map_or_else(|| "".to_string(), |s| s);
                     
                     // Check if this record should be sent to this destination
                     if let Some(Some(schemas)) = schema_filter {
