@@ -803,8 +803,45 @@ impl PostgresDestination {
                     }
                 }
                 Some("json") | Some("jsonb") => {
-                    // JSON type
-                    query_builder = query_builder.bind((*value).clone());
+                    // JSON type - handle both JSON objects and JSON strings
+                    match *value {
+                        serde_json::Value::String(s) => {
+                            let trimmed = s.trim();
+                            if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("null") {
+                                query_builder = query_builder.bind(None::<serde_json::Value>);
+                            } else if (trimmed.starts_with('{') && trimmed.ends_with('}'))
+                                || (trimmed.starts_with('[') && trimmed.ends_with(']'))
+                            {
+                                // Parse JSON string into object/array
+                                match serde_json::from_str::<serde_json::Value>(trimmed) {
+                                    Ok(json_val) => {
+                                        query_builder = query_builder.bind(json_val);
+                                    }
+                                    Err(e) => {
+                                        warn!(
+                                            "Cannot parse '{}' as JSON for column '{}': {}, binding as text",
+                                            trimmed, column_name, e
+                                        );
+                                        query_builder = query_builder.bind((*value).clone());
+                                    }
+                                }
+                            } else {
+                                // Plain string, bind as-is (will be converted to JSON string)
+                                query_builder = query_builder.bind((*value).clone());
+                            }
+                        }
+                        serde_json::Value::Null => {
+                            query_builder = query_builder.bind(None::<serde_json::Value>);
+                        }
+                        serde_json::Value::Object(_) | serde_json::Value::Array(_) => {
+                            // Already a JSON object/array, bind directly
+                            query_builder = query_builder.bind((*value).clone());
+                        }
+                        _ => {
+                            // Other types (Number, Bool), bind as-is
+                            query_builder = query_builder.bind((*value).clone());
+                        }
+                    }
                 }
                 Some("timestamp without time zone")
                 | Some("timestamp")
@@ -917,11 +954,12 @@ impl PostgresDestination {
                         continue;
                     }
 
-                    // Check if it's JSON
+                    // Check if it's JSON (for backward compatibility in execute_query)
                     if (trimmed.starts_with('{') && trimmed.ends_with('}'))
                         || (trimmed.starts_with('[') && trimmed.ends_with(']'))
                     {
                         if let Ok(json_val) = serde_json::from_str::<serde_json::Value>(trimmed) {
+                            info!("Parsing string as JSON object for JSONB column");
                             query_builder = query_builder.bind(json_val);
                         } else {
                             query_builder = query_builder.bind(s.clone());
