@@ -1,61 +1,17 @@
-[workspace]
-members = [
-    "crates/cdc-core",
-    "crates/cdc-connectors/nats",
-    "crates/cdc-connectors/redis",
-    "crates/cdc-destinations/postgres",
-    "crates/cdc-config-store",
-    "crates/cdc-api",
-    "crates/cdc-cli",
-]
-resolver = "2"
+[package]
+name = "cdcsink"
+version = "0.1.0"
+edition = "2024"
 
-[workspace.package]
-version = "0.2.0"
-edition = "2021"
-authors = ["Your Team <team@example.com>"]
-license = "MIT OR Apache-2.0"
-
-[workspace.dependencies]
-# Async runtime
-tokio = { version = "1.48.0", features = ["full"] }
-tokio-util = "0.7.17"
-futures = "0.3"
-async-trait = "0.1"
-etl = { git = "https://github.com/supabase/etl" }
-
-# Serialization
+[dependencies]
+anyhow = "1.0.100"
+async-nats = "0.46.0"
+async-trait = "0.1.89"
+chrono = "0.4.43"
+dotenvy = "0.15.7"
+futures-util = "0.3.31"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.148"
-
-# Error handling
-anyhow = "1.0"
-thiserror = "1.0"
-
-# Logging
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
-
-# NATS
-async-nats = "0.45.0"
-
-# PostgreSQL
-sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "json", "chrono", "uuid"] }
-tokio-postgres = { version = "0.7", features = ["with-serde_json-1", "with-uuid-1", "with-chrono-0_4"] }
-bytes = "1.6"
-
-# Config
-config = "0.14"
-serde_yaml = "0.9"
-
-# API Server
-axum = { version = "0.8", features = ["ws"] }
-tower = "0.5"
-tower-http = { version = "0.6", features = ["cors", "trace"] }
-
-# Time
-chrono = { version = "0.4", features = ["serde"] }
-
-# UUID
-uuid = { version = "1.11", features = ["serde", "v4", "v7"] }
-
+thiserror = "2.0.18"
+tokio = { version = "1.49", features = ["full"] }
+uuid = { version = "1.20", features = ["serde", "v4", "v7"] }

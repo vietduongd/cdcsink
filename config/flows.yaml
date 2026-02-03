@@ -1,9 +1,0 @@
-- name: '234234'
-  connector_name: nats
-  destination_names:
-  - '234234'
-  batch_size: 100
-  auto_start: true
-  description: ''
-  created_at: 2026-02-02T12:24:21.187585400Z
-  updated_at: 2026-02-02T12:24:21.187585500Z
