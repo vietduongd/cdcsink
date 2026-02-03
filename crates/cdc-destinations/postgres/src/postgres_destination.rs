@@ -849,7 +849,7 @@ impl PostgresDestination {
                 | Some("timestamptz")
                 | Some("date")
                 | Some("time") => {
-                    // Timestamp/Date/Time types - bind as string and let PostgreSQL parse
+                    // Timestamp/Date/Time types - handle Unix timestamps
                     match *value {
                         serde_json::Value::String(s) => {
                             let trimmed = s.trim();
@@ -858,6 +858,38 @@ impl PostgresDestination {
                             } else {
                                 // Let PostgreSQL handle the timestamp parsing
                                 query_builder = query_builder.bind(s.clone());
+                            }
+                        }
+                        serde_json::Value::Number(n) => {
+                            // Handle Unix timestamp (milliseconds or microseconds)
+                            if let Some(timestamp) = n.as_i64() {
+                                // Debezium typically uses microseconds for timestamps
+                                // Check if value is likely microseconds (> year 2100 in seconds)
+                                let timestamp_sec = if timestamp > 4_000_000_000 {
+                                    // Likely microseconds, convert to seconds
+                                    timestamp / 1_000_000
+                                } else if timestamp > 10_000_000_000 {
+                                    // Likely milliseconds, convert to seconds
+                                    timestamp / 1_000
+                                } else {
+                                    // Already in seconds
+                                    timestamp
+                                };
+                                
+                                // Convert Unix timestamp to ISO 8601 format
+                                use std::time::{UNIX_EPOCH, Duration};
+                                if let Some(datetime) = UNIX_EPOCH.checked_add(Duration::from_secs(timestamp_sec as u64)) {
+                                    let datetime_str = chrono::DateTime::<chrono::Utc>::from(datetime)
+                                        .format("%Y-%m-%d %H:%M:%S")
+                                        .to_string();
+                                    debug!("Converted timestamp {} to {}", timestamp, datetime_str);
+                                    query_builder = query_builder.bind(datetime_str);
+                                } else {
+                                    warn!("Invalid timestamp value: {}, binding NULL", timestamp);
+                                    query_builder = query_builder.bind(None::<String>);
+                                }
+                            } else {
+                                query_builder = query_builder.bind(None::<String>);
                             }
                         }
                         serde_json::Value::Null => {
@@ -1167,23 +1199,57 @@ impl Destination for PostgresDestination {
         info!("Connected to PostgreSQL successfully (sqlx pool)");
 
         // Also create a raw tokio-postgres connection for COPY operations
-        match tokio_postgres::connect(&self.config.url, NoTls).await {
-            Ok((client, connection)) => {
-                // Spawn connection handler in background
-                tokio::spawn(async move {
-                    if let Err(e) = connection.await {
-                        error!("tokio-postgres connection error: {}", e);
+        // Parse the URL and build connection config manually for better compatibility
+        match self.config.url.parse::<tokio_postgres::Config>() {
+            Ok(mut pg_config) => {
+                // Set SSL mode to prefer (allows both SSL and non-SSL)
+                pg_config.ssl_mode(tokio_postgres::config::SslMode::Prefer);
+                
+                debug!("Attempting tokio-postgres connection with config: {:?}", pg_config);
+                
+                match pg_config.connect(NoTls).await {
+                    Ok((client, connection)) => {
+                        // Spawn connection handler in background
+                        tokio::spawn(async move {
+                            if let Err(e) = connection.await {
+                                error!("tokio-postgres connection error: {}", e);
+                            }
+                        });
+                        self.copy_client = Some(client);
+                        info!("Connected tokio-postgres client for COPY operations");
                     }
-                });
-                self.copy_client = Some(client);
-                info!("Connected tokio-postgres client for COPY operations");
+                    Err(e) => {
+                        // Try again with SSL disabled as fallback
+                        debug!("First connection attempt failed: {}, trying with SSL disabled", e);
+                        pg_config.ssl_mode(tokio_postgres::config::SslMode::Disable);
+                        
+                        match pg_config.connect(NoTls).await {
+                            Ok((client, connection)) => {
+                                tokio::spawn(async move {
+                                    if let Err(e) = connection.await {
+                                        error!("tokio-postgres connection error: {}", e);
+                                    }
+                                });
+                                self.copy_client = Some(client);
+                                info!("Connected tokio-postgres client for COPY operations (SSL disabled)");
+                            }
+                            Err(e2) => {
+                                warn!(
+                                    "Failed to create tokio-postgres client for COPY, will use fallback. Error: {}. Note: COPY operations will not be available, batch writes will use individual inserts.",
+                                    e2
+                                );
+                                // Continue without COPY support - will fallback to individual inserts
+                            }
+                        }
+                    }
+                }
             }
             Err(e) => {
                 warn!(
-                    "Failed to create tokio-postgres client for COPY, will use fallback: {}",
+                    "Failed to parse PostgreSQL URL for tokio-postgres: {}. COPY operations disabled.",
                     e
                 );
-                // Continue without COPY support - will fallback to individual inserts
+                // Continue without COPY support
             }
         }
 
