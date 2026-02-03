@@ -52,6 +52,9 @@ COPY --from=builder /app/target/release/cdc-cli /usr/local/bin/cdc-cli
 COPY --from=builder /app/ui/dist /app
 
 COPY scripts/nginx.conf /etc/nginx/nginx.conf
+
+# Create directories and copy start script
+RUN mkdir -p /scripts
 COPY scripts/start.sh /scripts/start.sh
 
 # Create non-root user and set up permissions BEFORE switching user
