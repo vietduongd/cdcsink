@@ -73,9 +73,9 @@ impl NatsReceive {
             .messages()
             .await
             .map_err(|e| format!("Failed to receive messages: {}", e))?
-            .take(1);
+            .take(100);
 
-        let mut received_messages: Vec<NatMessageReceive> = Vec::with_capacity(1);
+        let mut received_messages: Vec<NatMessageReceive> = Vec::new();
         while let Some(Ok(message)) = messages.next().await {
           
             let data_record: DataRecord = serde_json::from_slice(&message.payload)

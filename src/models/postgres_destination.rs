@@ -1,6 +1,4 @@
-use std::{
-    collections::{HashMap, HashSet}
-};
+use std::collections::{HashMap, HashSet};
 
 use chrono::{DateTime, Utc};
 use serde_json::Value;
@@ -187,26 +185,34 @@ impl PostgresDestination {
                 .as_str(),
             );
         }
-        s.push_str(");");
+        s.push_str(") ON CONFLICT (\"id\") DO UPDATE SET ");
+        for (i, column) in colum_keys.clone().iter().enumerate() {
+            if column == "id" {
+                continue;
+            }
+            s.push_str(
+                format!(
+                    "{} = EXCLUDED.{} {}",
+                    Self::quote_identifier(column),
+                    Self::quote_identifier(column),
+                    if i < max_records.clone() - 1 { "," } else { "" }
+                )
+                .as_str(),
+            );
+        }
         println!("Insert Query: {}", s);
-
         // Build typed value vectors based on simple_type
         let mut query = sqlx::query(&s);
-        
+
         for column in colum_keys.clone() {
             let data_model = column_active.table_value.get(&column).unwrap();
             let simple_type = &data_model.simple_type;
-            
-            println!("Binding column: {} with type: {}", column, simple_type);
-            
+
             // Collect values from all records for this column
             let values: Vec<Value> = columns
                 .iter()
                 .map(|col_info| col_info.table_value.get(&column).unwrap().value.clone())
                 .collect();
-            
-            println!("Values Map: {:?}", values);
-            
             // Bind based on the PostgreSQL type
             match simple_type.as_str() {
                 "TEXT" => {
@@ -224,17 +230,13 @@ impl PostgresDestination {
                     query = query.bind(int_values);
                 }
                 "BIGINT" => {
-                    let bigint_values: Vec<i64> = values
-                        .iter()
-                        .map(|v| v.as_i64().unwrap_or(0))
-                        .collect();
+                    let bigint_values: Vec<i64> =
+                        values.iter().map(|v| v.as_i64().unwrap_or(0)).collect();
                     query = query.bind(bigint_values);
                 }
                 "DOUBLE PRECISION" | "REAL" => {
-                    let float_values: Vec<f64> = values
-                        .iter()
-                        .map(|v| v.as_f64().unwrap_or(0.0))
-                        .collect();
+                    let float_values: Vec<f64> =
+                        values.iter().map(|v| v.as_f64().unwrap_or(0.0)).collect();
                     query = query.bind(float_values);
                 }
                 "BOOLEAN" => {
@@ -286,15 +288,12 @@ impl PostgresDestination {
                 }
                 _ => {
                     // Default to TEXT for unknown types
-                    let text_values: Vec<String> = values
-                        .iter()
-                        .map(|v| v.to_string())
-                        .collect();
+                    let text_values: Vec<String> = values.iter().map(|v| v.to_string()).collect();
                     query = query.bind(text_values);
                 }
             }
         }
-        
+
         query.execute(pool).await.expect("Failed to insert values");
     }
 
