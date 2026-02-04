@@ -45,8 +45,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .get_schema_info(&pg_pool)
         .await
         .map_err(|e| Box::<dyn Error>::from(e))?;
-    println!("Current schema info from DB: {:?}", schema_cache);
-
     loop {
         println!("Waiting for messages at {}", Local::now());
         let messages = nats_info.receive_messages(&mut consumer).await?;
@@ -76,9 +74,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
             pg_destination.insert_value(&active_item.0, &active_item.1, &pg_pool).await;
         }
         nats_info.ack_message(&messages).await?;
-        println!("Waiting for messages end at {}", Local::now());
         counter += 1;
-        println!("Loop count: {}", counter);
+        println!("Loop count: {}, at {}", counter, Local::now());
     }
     Ok(())
 }

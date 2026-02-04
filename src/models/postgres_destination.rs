@@ -195,12 +195,11 @@ impl PostgresDestination {
                     "{} = EXCLUDED.{} {}",
                     Self::quote_identifier(column),
                     Self::quote_identifier(column),
-                    if i < max_records.clone() - 1 { "," } else { "" }
+                    if i < max_records.clone() - 2 { "," } else { "" }
                 )
                 .as_str(),
             );
         }
-        println!("Insert Query: {}", s);
         // Build typed value vectors based on simple_type
         let mut query = sqlx::query(&s);
 
@@ -216,79 +215,131 @@ impl PostgresDestination {
             // Bind based on the PostgreSQL type
             match simple_type.as_str() {
                 "TEXT" => {
-                    let text_values: Vec<String> = values
+                    let text_values: Vec<Option<String>> = values
                         .iter()
-                        .map(|v| v.as_str().unwrap_or("").to_string())
+                        .map(|v| {
+                            if v.is_null() {
+                                None
+                            } else {
+                                v.as_str().map(|s| s.to_string())
+                            }
+                        })
                         .collect();
                     query = query.bind(text_values);
                 }
                 "INTEGER" | "SMALLINT" => {
-                    let int_values: Vec<i32> = values
+                    let int_values: Vec<Option<i32>> = values
                         .iter()
-                        .map(|v| v.as_i64().unwrap_or(0) as i32)
+                        .map(|v| {
+                            if v.is_null() {
+                                None
+                            } else {
+                                v.as_i64().map(|i| i as i32)
+                            }
+                        })
                         .collect();
                     query = query.bind(int_values);
                 }
                 "BIGINT" => {
-                    let bigint_values: Vec<i64> =
-                        values.iter().map(|v| v.as_i64().unwrap_or(0)).collect();
+                    let bigint_values: Vec<Option<i64>> = values
+                        .iter()
+                        .map(|v| {
+                            if v.is_null() {
+                                None
+                            } else {
+                                v.as_i64()
+                            }
+                        })
+                        .collect();
                     query = query.bind(bigint_values);
                 }
                 "DOUBLE PRECISION" | "REAL" => {
-                    let float_values: Vec<f64> =
-                        values.iter().map(|v| v.as_f64().unwrap_or(0.0)).collect();
+                    let float_values: Vec<Option<f64>> = values
+                        .iter()
+                        .map(|v| {
+                            if v.is_null() {
+                                None
+                            } else {
+                                v.as_f64()
+                            }
+                        })
+                        .collect();
                     query = query.bind(float_values);
                 }
                 "BOOLEAN" => {
-                    let bool_values: Vec<bool> = values
+                    let bool_values: Vec<Option<bool>> = values
                         .iter()
-                        .map(|v| v.as_bool().unwrap_or(false))
+                        .map(|v| {
+                            if v.is_null() {
+                                None
+                            } else {
+                                v.as_bool()
+                            }
+                        })
                         .collect();
                     query = query.bind(bool_values);
                 }
                 "TIMESTAMPTZ" | "TIMESTAMP" => {
-                    let timestamp_values: Vec<DateTime<Utc>> = values
+                    let timestamp_values: Vec<Option<DateTime<Utc>>> = values
                         .iter()
                         .map(|v| {
-                            v.as_str()
-                                .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
-                                .map(|dt| dt.with_timezone(&Utc))
-                                .unwrap_or_else(|| Utc::now())
+                            if v.is_null() {
+                                None
+                            } else {
+                                v.as_str()
+                                    .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+                                    .map(|dt| dt.with_timezone(&Utc))
+                            }
                         })
                         .collect();
                     query = query.bind(timestamp_values);
                 }
                 "UUID" => {
-                    let uuid_values: Vec<Uuid> = values
+                    let uuid_values: Vec<Option<Uuid>> = values
                         .iter()
                         .map(|v| {
-                            v.as_str()
-                                .and_then(|s| Uuid::parse_str(s).ok())
-                                .unwrap_or_else(|| Uuid::nil())
+                            if v.is_null() {
+                                None
+                            } else {
+                                v.as_str().and_then(|s| Uuid::parse_str(s).ok())
+                            }
                         })
                         .collect();
                     query = query.bind(uuid_values);
                 }
                 "JSONB" | "JSON" => {
-                    let jsonb_values: Vec<Json<Value>> = values
+                    let jsonb_values: Vec<Option<Json<Value>>> = values
                         .iter()
                         .map(|v| {
-                            // If the value is already a JSON object/array, use it directly
-                            // If it's a string, try to parse it
-                            if v.is_string() {
-                                let s = v.as_str().unwrap();
-                                serde_json::from_str(s).unwrap_or_else(|_| v.clone())
+                            if v.is_null() {
+                                None
                             } else {
-                                v.clone()
+                                // If the value is already a JSON object/array, use it directly
+                                // If it's a string, try to parse it
+                                let parsed = if v.is_string() {
+                                    let s = v.as_str().unwrap();
+                                    serde_json::from_str(s).unwrap_or_else(|_| v.clone())
+                                } else {
+                                    v.clone()
+                                };
+                                Some(Json(parsed))
                             }
                         })
-                        .map(|v| Json(v))
                         .collect();
                     query = query.bind(jsonb_values);
                 }
                 _ => {
                     // Default to TEXT for unknown types
-                    let text_values: Vec<String> = values.iter().map(|v| v.to_string()).collect();
+                    let text_values: Vec<Option<String>> = values
+                        .iter()
+                        .map(|v| {
+                            if v.is_null() {
+                                None
+                            } else {
+                                Some(v.to_string())
+                            }
+                        })
+                        .collect();
                     query = query.bind(text_values);
                 }
             }
