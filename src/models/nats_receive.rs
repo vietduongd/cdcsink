@@ -18,7 +18,6 @@ pub struct NatsReceive {
     pub durable_name: String,
     pub topic_name: String,
     pub stream: String,
-    table_schema: HashMap<String, HashSet<String>>,
 }
 
 pub struct NatMessageReceive {
@@ -34,7 +33,6 @@ impl NatsReceive {
             durable_name,
             topic_name,
             stream,
-            table_schema: HashMap::new(),
         }
     }
 
@@ -58,6 +56,7 @@ impl NatsReceive {
                 async_nats::jetstream::consumer::pull::Config {
                     durable_name: Some(self.durable_name.clone()),
                     filter_subject: self.topic_name.clone(),
+                    ack_wait: std::time::Duration::from_secs(10),
                     ..Default::default()
                 },
             )
