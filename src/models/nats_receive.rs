@@ -68,14 +68,16 @@ impl NatsReceive {
     pub async fn receive_messages(
         &self,
         consumer: &mut PullConsumer,
-    ) -> Result<HashMap<String, Vec<NatMessageReceive>>, String> {
+    ) -> Result<Vec<NatMessageReceive>, String> {
         let mut messages = consumer
             .messages()
             .await
             .map_err(|e| format!("Failed to receive messages: {}", e))?
-            .take(1000);
-        let mut received_messages: HashMap<String, Vec<NatMessageReceive>> = HashMap::new();
+            .take(1);
+
+        let mut received_messages: Vec<NatMessageReceive> = Vec::with_capacity(1);
         while let Some(Ok(message)) = messages.next().await {
+          
             let data_record: DataRecord = serde_json::from_slice(&message.payload)
                 .map_err(|e| format!("Failed to deserialize message payload: {}", e))?;
 
@@ -87,14 +89,11 @@ impl NatsReceive {
                 .get_table_structure()
                 .ok_or("Failed to get table structure from data record")?;
 
-            received_messages
-                .entry(table_name.clone())
-                .or_insert_with(Vec::new)
-                .push(NatMessageReceive {
-                    message,
-                    table_name,
-                    table_value: table_schema,
-                });
+            received_messages.push(NatMessageReceive {
+                message,
+                table_name,
+                table_value: table_schema,
+            });
         }
 
         Ok(received_messages)

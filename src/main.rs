@@ -1,9 +1,13 @@
-﻿use std::{env, error::Error};
+﻿use std::{
+    collections::{HashMap, HashSet},
+    env,
+    error::Error,
+};
 
-use chrono::{Local, format};
+use chrono::Local;
 use dotenvy::dotenv;
 
-use crate::models::PostgresDestination;
+use crate::models::{NatMessageReceive, PostgresDestination};
 
 mod models;
 
@@ -13,6 +17,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let db_url = env::var("DATABASE_URL").expect("DATABASE_URL not set");
     let nats_url = env::var("NATS_URL").expect("NATS_URL not set");
     let topic_name = env::var("TOPIC_NAME").expect("TOPIC_NAME not set");
+    let database_schema_expected =
+        env::var("DATABASE_SCHEMA_EXPECT").unwrap_or("public".to_string());
+
     let nats_consumer_name =
         env::var("NATS_CONSUMER_NAME").unwrap_or("cdcsink_consumer".to_string());
     let nats_stream_name = env::var("NATS_STREAM_NAME").expect("NATS_STREAM_NAME not set");
@@ -22,7 +29,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let mut consumer = nats_info.connected().await?;
 
-    let pg_destination = PostgresDestination::new(db_url);
+    let pg_destination = PostgresDestination::new(db_url, database_schema_expected.clone());
     let pg_pool = pg_destination
         .connect()
         .await
@@ -34,29 +41,44 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .map_err(|e| Box::<dyn Error>::from(e))?;
 
     let mut counter = 0;
-    // loop {
-    //     println!("Waiting for messages at {}", Local::now());
-    //     let messages = nats_info.receive_messages(&mut consumer).await?;
-    //     for (key, vec_msgs) in &messages {
-    //         println!("Key = {}", key);
+    let mut schema_cache = pg_destination
+        .get_schema_info(&pg_pool)
+        .await
+        .map_err(|e| Box::<dyn Error>::from(e))?;
+    println!("Current schema info from DB: {:?}", schema_cache);
 
-    //         for msg in vec_msgs {
-    //             println!("Table: {}", msg.table_name);
-    //             if let Some(data_model) = msg.table_value.get("Time01") {
-    //                 println!(
-    //                     "Time01 - Type: {}, Value: {:?}, Nullable: {}",
-    //                     data_model.data_type, data_model.value, data_model.nullable
-    //                 );
-    //             }
-    //         }
-    //     }
-    //     for item in messages {
-    //         nats_info.ack_message(&item.1).await?;
-    //     }
-    //     println!("Waiting for messages end at {}", Local::now());
-    //     counter += 1;
-    //     println!("Loop count: {}", counter);
-    // }
-
+    loop {
+        println!("Waiting for messages at {}", Local::now());
+        let messages = nats_info.receive_messages(&mut consumer).await?;
+        let mut message_active: HashMap<String, Vec<&NatMessageReceive>> = HashMap::new();
+        for msg in &messages {
+            let table_name = &msg.table_name;
+            if !schema_cache.contains_key(table_name) {
+                pg_destination
+                    .create_table_if_not_exists_query(
+                        &database_schema_expected.clone(),
+                        table_name,
+                        &msg.table_value,
+                        &pg_pool,
+                    )
+                    .await;
+                schema_cache.insert(
+                    table_name.clone(),
+                    msg.table_value.keys().cloned().collect(),
+                );
+            }
+            message_active
+                .entry(table_name.clone())
+                .or_insert(Vec::new())
+                .push(msg);
+        }
+        for active_item in message_active {
+            pg_destination.insert_value(&active_item.0, &active_item.1, &pg_pool).await;
+        }
+        nats_info.ack_message(&messages).await?;
+        println!("Waiting for messages end at {}", Local::now());
+        counter += 1;
+        println!("Loop count: {}", counter);
+    }
     Ok(())
 }

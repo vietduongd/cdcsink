@@ -186,13 +186,21 @@ impl DataRecord {
             if value.is_none() {
                 continue;
             }
-            let data_type = DataRecord::look_up_data_type(&field_type, value.unwrap())
-                .unwrap_or(("TEXT".to_string(), Value::Null));
-            structure.insert(field_name, DataModel {
-                value: data_type.1,
-                data_type: data_type.0,
-                nullable: item.optional,
-            });
+            let data_type = DataRecord::look_up_data_type(&field_type, value.unwrap()).unwrap_or((
+                "TEXT".to_string(),
+                "TEXT".to_string(),
+                Value::Null,
+            ));
+
+            structure.insert(
+                field_name,
+                DataModel {
+                    value: data_type.2,
+                    data_type: data_type.0,
+                    nullable: item.optional,
+                    simple_type: data_type.1,
+                },
+            );
         }
         Some(structure)
     }
@@ -217,23 +225,37 @@ impl DataRecord {
         }
     }
 
-    fn look_up_data_type(data_type: &str, value: &Value) -> Option<(String, Value)> {
+    fn look_up_data_type(data_type: &str, value: &Value) -> Option<(String, String, Value)> {
         match data_type {
-            "int8" => Some(("BIGINT".to_string(), value.clone())),
-            "int16" => Some(("SMALLINT".to_string(), value.clone())),
-            "int32" => Some(("INTEGER".to_string(), value.clone())),
-            "int64" => Some(("BIGINT".to_string(), value.clone())),
-            "float" => Some(("BIGINT".to_string(), value.clone())),
-            "float32" => Some(("REAL".to_string(), value.clone())),
-            "float64" => Some(("DOUBLE PRECISION".to_string(), value.clone())),
-            "boolean" => Some(("BOOLEAN".to_string(), value.clone())),
-            "string" => Some(("TEXT".to_string(), value.clone())),
-            "bytes" => Some(("BYTEA".to_string(), value.clone())),
-            "date" => Some(("DATE".to_string(), value.clone())),
-            "time" => Some(("TIME".to_string(), value.clone())),
-            "timestamp" => Some(("TIMESTAMP".to_string(), value.clone())),
-            "decimal" => Some(("NUMERIC".to_string(), value.clone())),
-            "io.debezium.data.VariableScaleDecimal" => Some(("NUMERIC".to_string(), value.clone())),
+            "int8" => Some(("BIGINT".to_string(), "BIGINT".to_string(), value.clone())),
+            "int16" => Some((
+                "SMALLINT".to_string(),
+                "SMALLINT".to_string(),
+                value.clone(),
+            )),
+            "int32" => Some(("INTEGER".to_string(), "INTEGER".to_string(), value.clone())),
+            "int64" => Some(("BIGINT".to_string(), "BIGINT".to_string(), value.clone())),
+            "float" => Some(("BIGINT".to_string(), "BIGINT".to_string(), value.clone())),
+            "float32" => Some(("REAL".to_string(), "REAL".to_string(), value.clone())),
+            "float64" => Some((
+                "DOUBLE PRECISION".to_string(),
+                "DOUBLE PRECISION".to_string(),
+                value.clone(),
+            )),
+            "boolean" => Some(("BOOLEAN".to_string(), "BOOLEAN".to_string(), value.clone())),
+            "string" => Some(("TEXT".to_string(), "TEXT".to_string(), value.clone())),
+            "bytes" => Some(("BYTEA".to_string(), "BYTEA".to_string(), value.clone())),
+            "date" => Some(("DATE".to_string(), "DATE".to_string(), value.clone())),
+            "time" => Some(("TIME".to_string(), "TIME".to_string(), value.clone())),
+            "timestamp" => Some((
+                "TIMESTAMP".to_string(),
+                "TIMESTAMP".to_string(),
+                value.clone(),
+            )),
+            "decimal" => Some(("NUMERIC".to_string(), "NUMERIC".to_string(), value.clone())),
+            "io.debezium.data.VariableScaleDecimal" => {
+                Some(("NUMERIC".to_string(), "NUMERIC".to_string(), value.clone()))
+            }
             "io.debezium.time.Date" => {
                 let result = match value {
                     Value::Null => value.clone(),
@@ -248,9 +270,11 @@ impl DataRecord {
                     }
                     _ => value.clone(),
                 };
-                Some(("DATE".to_string(), result))
+                Some(("DATE".to_string(), "DATE".to_string(), result))
             }
-            "io.debezium.time.Time" => Some(("TIME".to_string(), value.clone())),
+            "io.debezium.time.Time" => {
+                Some(("TIME".to_string(), "TIME".to_string(), value.clone()))
+            }
             "io.debezium.time.Timestamp"
             | "io.debezium.time.MicroTimestamp"
             | "io.debezium.time.NanoTimestamp"
@@ -269,28 +293,24 @@ impl DataRecord {
                     _ => value.clone(),
                 };
                 if data_type == "io.debezium.time.ZonedTimestamp" {
-                    Some(("TIMESTAMP WITH TIME ZONE".to_string(), result))
+                    Some((
+                        "TIMESTAMP WITH TIME ZONE".to_string(),
+                        "TIMESTAMPTZ".to_string(),
+                        result,
+                    ))
                 } else {
-                    Some(("TIMESTAMP".to_string(), result))
+                    Some(("TIMESTAMP".to_string(), "TIMESTAMP".to_string(), result))
                 }
             }
-            "io.debezium.data.Json" =>{
-                let result = match value {
-                    Value::Null => value.clone(),
-                    Value::String(s) => {
-                        if let Ok(json_value) = serde_json::from_str::<Value>(s) {
-                            json_value
-                        } else {
-                            Value::Null
-                        }
-                    }
-                    _ => value.clone(),
-                };
-                Some(("JSONB".to_string(), result))
+            "io.debezium.data.Json" | "io.debezium.data.Jsonb" => {
+                Some(("JSONB".to_string(), "JSONB".to_string(), value.clone()))
             }
-            "io.debezium.data.Jsonb" => Some(("JSONB".to_string(), value.clone())),
-            "io.debezium.data.Uuid" => Some(("UUID".to_string(), value.clone())),
-            "io.debezium.data.Enum" => Some(("TEXT".to_string(), value.clone())),
+            "io.debezium.data.Uuid" => {
+                Some(("UUID".to_string(), "UUID".to_string(), value.clone()))
+            }
+            "io.debezium.data.Enum" => {
+                Some(("TEXT".to_string(), "TEXT".to_string(), value.clone()))
+            }
             _ => None,
         }
     }
