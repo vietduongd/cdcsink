@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::HashMap;
+use std::{collections::HashMap, result};
+
+use crate::models::DataModel;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -135,7 +137,7 @@ impl DataRecord {
     }
 
     /// Get the table name from source metadata
-    pub fn table_name(&self) -> Option<String> {
+    pub fn get_table_name(&self) -> Option<String> {
         Some(self.payload.source.table.clone())
     }
 
@@ -161,7 +163,7 @@ impl DataRecord {
     }
 
     // Get table structure as a HashMap of field names to (data_type, is_nullable)
-    pub fn get_table_structure(&self) -> Option<HashMap<String, (String, bool)>> {
+    pub fn get_table_structure(&self) -> Option<HashMap<String, DataModel>> {
         let after_schema = self
             .schema
             .fields
@@ -170,50 +172,125 @@ impl DataRecord {
         if after_schema.is_none() {
             return None;
         }
-        let mut structure: HashMap<String, (String, bool)> = HashMap::new();
-        for item  in after_schema.unwrap().fields.as_ref().unwrap() {
+        let mut structure: HashMap<String, DataModel> = HashMap::new();
+        let raw_data = self.get_table_data();
+        for item in after_schema.unwrap().fields.as_ref().unwrap() {
             let field_name = item.field.as_ref().unwrap().to_string();
-            let data_type = DataRecord::look_up_data_type(&item.field_type).unwrap_or("TEXT".to_string());
-            let is_nullable = item.optional;
-            structure.insert(field_name, (data_type, is_nullable));
+
+            let field_type = if item.name.is_some() {
+                item.name.clone().unwrap()
+            } else {
+                item.field_type.clone()
+            };
+            let value = raw_data.get(&field_name);
+            if value.is_none() {
+                continue;
+            }
+            let data_type = DataRecord::look_up_data_type(&field_type, value.unwrap())
+                .unwrap_or(("TEXT".to_string(), Value::Null));
+            structure.insert(field_name, DataModel {
+                value: data_type.1,
+                data_type: data_type.0,
+                nullable: item.optional,
+            });
         }
         Some(structure)
     }
 
-    // pub fn get_postgres_data_type(&self, field_name: &str) -> Option<String> {
-    //     let structure = self.get_table_structure();
-    //     structure
-    //         .get(field_name)
-    //         .map(|(data_type, _)| data_type.clone())
-    // }
+    fn get_table_data(&self) -> HashMap<String, Value> {
+        match self.payload.op.as_str() {
+            "c" | "r" | "u" => {
+                if let Some(after) = &self.payload.after {
+                    after.clone()
+                } else {
+                    HashMap::new()
+                }
+            }
+            "d" => {
+                if let Some(before) = &self.payload.before {
+                    before.clone()
+                } else {
+                    HashMap::new()
+                }
+            }
+            _ => HashMap::new(),
+        }
+    }
 
-    fn look_up_data_type(data_type: &str) -> Option<String> {
+    fn look_up_data_type(data_type: &str, value: &Value) -> Option<(String, Value)> {
         match data_type {
-            "int8" => Some("BIGINT".to_string()),
-            "int16" => Some("SMALLINT".to_string()),
-            "int32" => Some("INTEGER".to_string()),
-            "int64" => Some("BIGINT".to_string()),
-            "float" => Some("BIGINT".to_string()),
-            "float32" => Some("REAL".to_string()),
-            "float64" => Some("DOUBLE PRECISION".to_string()),
-            "boolean" => Some("BOOLEAN".to_string()),
-            "string" => Some("TEXT".to_string()),
-            "bytes" => Some("BYTEA".to_string()),
-            "date" => Some("DATE".to_string()),
-            "time" => Some("TIME".to_string()),
-            "timestamp" => Some("TIMESTAMP".to_string()),
-            "decimal" => Some("NUMERIC".to_string()),
-            "io.debezium.data.VariableScaleDecimal" => Some("NUMERIC".to_string()),
-            "io.debezium.time.Date" => Some("DATE".to_string()),
-            "io.debezium.time.Time" => Some("TIME".to_string()),
-            "io.debezium.time.Timestamp" => Some("TIMESTAMP".to_string()),
-            "io.debezium.time.MicroTimestamp" => Some("TIMESTAMP".to_string()),
-            "io.debezium.time.NanoTimestamp" => Some("TIMESTAMP".to_string()),
-            "io.debezium.time.ZonedTimestamp" => Some("TIMESTAMPTZ".to_string()),
-            "io.debezium.data.Json" => Some("JSONB".to_string()),
-            "io.debezium.data.Jsonb" => Some("JSONB".to_string()),
-            "io.debezium.data.Uuid" => Some("UUID".to_string()),
-            "io.debezium.data.Enum" => Some("TEXT".to_string()),
+            "int8" => Some(("BIGINT".to_string(), value.clone())),
+            "int16" => Some(("SMALLINT".to_string(), value.clone())),
+            "int32" => Some(("INTEGER".to_string(), value.clone())),
+            "int64" => Some(("BIGINT".to_string(), value.clone())),
+            "float" => Some(("BIGINT".to_string(), value.clone())),
+            "float32" => Some(("REAL".to_string(), value.clone())),
+            "float64" => Some(("DOUBLE PRECISION".to_string(), value.clone())),
+            "boolean" => Some(("BOOLEAN".to_string(), value.clone())),
+            "string" => Some(("TEXT".to_string(), value.clone())),
+            "bytes" => Some(("BYTEA".to_string(), value.clone())),
+            "date" => Some(("DATE".to_string(), value.clone())),
+            "time" => Some(("TIME".to_string(), value.clone())),
+            "timestamp" => Some(("TIMESTAMP".to_string(), value.clone())),
+            "decimal" => Some(("NUMERIC".to_string(), value.clone())),
+            "io.debezium.data.VariableScaleDecimal" => Some(("NUMERIC".to_string(), value.clone())),
+            "io.debezium.time.Date" => {
+                let result = match value {
+                    Value::Null => value.clone(),
+                    Value::Number(n) => {
+                        if let Some(days) = n.as_i64() {
+                            let epoch = chrono::NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
+                            let date = epoch + chrono::Duration::days(days);
+                            Value::String(date.format("%Y-%m-%d").to_string())
+                        } else {
+                            value.clone()
+                        }
+                    }
+                    _ => value.clone(),
+                };
+                Some(("DATE".to_string(), result))
+            }
+            "io.debezium.time.Time" => Some(("TIME".to_string(), value.clone())),
+            "io.debezium.time.Timestamp"
+            | "io.debezium.time.MicroTimestamp"
+            | "io.debezium.time.NanoTimestamp"
+            | "io.debezium.time.ZonedTimestamp" => {
+                let result = match value {
+                    Value::Null => value.clone(),
+                    Value::Number(n) => {
+                        if let Some(days) = n.as_i64() {
+                            let epoch = chrono::NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
+                            let date = epoch + chrono::Duration::days(days);
+                            Value::String(date.format("%Y-%m-%d %H:%M:%S").to_string())
+                        } else {
+                            value.clone()
+                        }
+                    }
+                    _ => value.clone(),
+                };
+                if data_type == "io.debezium.time.ZonedTimestamp" {
+                    Some(("TIMESTAMP WITH TIME ZONE".to_string(), result))
+                } else {
+                    Some(("TIMESTAMP".to_string(), result))
+                }
+            }
+            "io.debezium.data.Json" =>{
+                let result = match value {
+                    Value::Null => value.clone(),
+                    Value::String(s) => {
+                        if let Ok(json_value) = serde_json::from_str::<Value>(s) {
+                            json_value
+                        } else {
+                            Value::Null
+                        }
+                    }
+                    _ => value.clone(),
+                };
+                Some(("JSONB".to_string(), result))
+            }
+            "io.debezium.data.Jsonb" => Some(("JSONB".to_string(), value.clone())),
+            "io.debezium.data.Uuid" => Some(("UUID".to_string(), value.clone())),
+            "io.debezium.data.Enum" => Some(("TEXT".to_string(), value.clone())),
             _ => None,
         }
     }

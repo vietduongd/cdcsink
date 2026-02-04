@@ -14,15 +14,24 @@ async fn main() -> Result<(), Box<dyn Error>> {
         env::var("NATS_CONSUMER_NAME").unwrap_or("cdcsink_consumer".to_string());
     let nats_stream_name = env::var("NATS_STREAM_NAME").expect("NATS_STREAM_NAME not set");
 
-    let nats_info = models::NatsReceive::new(
-        nats_url,
-        nats_consumer_name,
-        topic_name,
-        nats_stream_name,
-    );
+    let nats_info =
+        models::NatsReceive::new(nats_url, nats_consumer_name, topic_name, nats_stream_name);
 
     let mut consumer = nats_info.connected().await?;
-    let _messages = nats_info.receive_messages(&mut consumer).await?;
+    loop {
+        let messages = nats_info.receive_messages(&mut consumer).await?;
+        for (key, vec_msgs) in &messages {
+            println!("Key = {}", key);
+
+            for msg in vec_msgs {
+                println!("Table: {}", msg.table_name);
+                println!("Table value: {:?}", msg.table_value["Time01"]);
+            }
+        }
+        for item in messages {
+            nats_info.ack_message(&item.1).await?;
+        }
+    }
 
     Ok(())
 }
