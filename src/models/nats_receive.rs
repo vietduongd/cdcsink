@@ -18,6 +18,7 @@ pub struct NatsReceive {
     pub durable_name: String,
     pub topic_name: String,
     pub stream: String,
+    pub number_pull_object: usize,
 }
 
 pub struct NatMessageReceive {
@@ -29,12 +30,19 @@ pub struct NatMessageReceive {
 }
 
 impl NatsReceive {
-    pub fn new(url: String, durable_name: String, topic_name: String, stream: String) -> Self {
+    pub fn new(
+        url: String,
+        durable_name: String,
+        topic_name: String,
+        stream: String,
+        number_pull_object: usize,
+    ) -> Self {
         NatsReceive {
             url,
             durable_name,
             topic_name,
             stream,
+            number_pull_object,
         }
     }
 
@@ -75,14 +83,14 @@ impl NatsReceive {
             .messages()
             .await
             .map_err(|e| format!("Failed to receive messages: {}", e))?
-            .take(100);
+            .take(self.number_pull_object);
 
         let mut received_messages: Vec<NatMessageReceive> = Vec::new();
         let mut counter = 0;
         while let Some(Ok(message)) = messages.next().await {
             let data_record: DataRecord = serde_json::from_slice(&message.payload)
                 .map_err(|e| format!("Failed to deserialize message payload: {}", e))?;
-
+            
             let table_name = data_record
                 .get_table_name()
                 .ok_or("Failed to get table name from data record")?;

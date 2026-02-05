@@ -282,10 +282,29 @@ impl DataRecord {
                 let result = match value {
                     Value::Null => value.clone(),
                     Value::Number(n) => {
-                        if let Some(days) = n.as_i64() {
-                            let epoch = chrono::NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
-                            let date = epoch + chrono::Duration::days(days);
-                            Value::String(date.format("%Y-%m-%d %H:%M:%S").to_string())
+                        if let Some(timestamp) = n.as_i64() {
+                            let datetime = match data_type {
+                                "io.debezium.time.Timestamp" | "io.debezium.time.ZonedTimestamp" => {
+                                    // milliseconds since epoch
+                                    chrono::DateTime::from_timestamp_millis(timestamp)
+                                }
+                                "io.debezium.time.MicroTimestamp" => {
+                                    // microseconds since epoch
+                                    chrono::DateTime::from_timestamp_micros(timestamp)
+                                }
+                                "io.debezium.time.NanoTimestamp" => {
+                                    // nanoseconds since epoch
+                                    let secs = timestamp / 1_000_000_000;
+                                    let nsecs = (timestamp % 1_000_000_000) as u32;
+                                    chrono::DateTime::from_timestamp(secs, nsecs)
+                                }
+                                _ => None,
+                            };
+                            if let Some(dt) = datetime {
+                                Value::String(dt.format("%Y-%m-%d %H:%M:%S").to_string())
+                            } else {
+                                value.clone()
+                            }
                         } else {
                             value.clone()
                         }

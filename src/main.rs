@@ -14,15 +14,18 @@ mod models;
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     println!("Starting CDC Sink application...");
-    
+
     dotenv().ok();
-    
+
     println!("Loading environment variables...");
     let db_url = env::var("DATABASE_URL").expect("DATABASE_URL not set");
     let nats_url = env::var("NATS_URL").expect("NATS_URL not set");
     let topic_name = env::var("TOPIC_NAME").expect("TOPIC_NAME not set");
     let database_schema_expected =
         env::var("DATABASE_SCHEMA_EXPECT").unwrap_or("public".to_string());
+    let number_pull_object = env::var("NATS_PULL_NUMBER_OBJECT")
+        .unwrap_or("100".to_string())
+        .parse::<usize>()?;
 
     let nats_consumer_name =
         env::var("NATS_CONSUMER_NAME").unwrap_or("cdcsink_consumer".to_string());
@@ -34,9 +37,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
     println!("Stream: {}", nats_stream_name);
     println!("Consumer: {}", nats_consumer_name);
     println!("Schema: {}", database_schema_expected);
-    
-    let nats_info =
-        models::NatsReceive::new(nats_url, nats_consumer_name, topic_name, nats_stream_name);
+
+    let nats_info = models::NatsReceive::new(
+        nats_url,
+        nats_consumer_name,
+        topic_name,
+        nats_stream_name,
+        number_pull_object,
+    );
 
     let mut consumer = nats_info.connected().await?;
 
@@ -82,11 +90,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 .push(msg);
         }
         for active_item in message_active {
-            pg_destination.insert_value(&active_item.0, &active_item.1, &pg_pool).await;
+            pg_destination
+                .insert_value(&active_item.0, &active_item.1, &pg_pool)
+                .await;
         }
         nats_info.ack_message(&messages).await?;
         counter += 1;
         println!("Loop count: {}, at {}", counter, Local::now());
+        println!(" ")
     }
     Ok(())
 }

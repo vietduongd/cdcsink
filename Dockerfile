@@ -11,12 +11,6 @@ RUN apt-get update && \
 # Copy manifests
 COPY Cargo.toml ./
 
-# Create dummy source to cache dependencies
-RUN mkdir src && \
-    echo "fn main() {}" > src/main.rs && \
-    cargo build --release && \
-    rm -rf src
-
 # Copy actual source code
 COPY src ./src
 

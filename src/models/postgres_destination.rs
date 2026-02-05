@@ -1,11 +1,12 @@
 use std::collections::{HashMap, HashSet};
 
-use chrono::{DateTime, Utc};
+use base64::{Engine, engine::general_purpose};
+use chrono::{DateTime, Datelike, Timelike, Utc};
 use serde_json::Value;
 use sqlx::{PgPool, Row, postgres::PgPoolOptions, types::Json};
 use uuid::Uuid;
 
-use crate::models::{DataModel, NatMessageReceive};
+use crate::models::{DataModel, NatMessageReceive, models_info::DecimalModel};
 
 pub struct PostgresDestination {
     pub database_url: String,
@@ -138,8 +139,26 @@ impl PostgresDestination {
         }
     }
 
-    fn remove_duplicate_data<'a>(records: &'a Vec<&'a NatMessageReceive>) -> Vec<&'a NatMessageReceive> {
-        let mut seen_ids: HashMap<String, &NatMessageReceive> = HashMap::<String, &'a NatMessageReceive>::new();
+    fn convert_base64_to_decimal(base64_value: &str, scale: i32) -> Option<f64> {
+        // Decode base64
+        let bytes = general_purpose::STANDARD
+            .decode(base64_value)
+            .expect("invalid base64");
+
+        let mut raw: i64 = 0;
+        for b in bytes {
+            raw = (raw << 8) | b as i64;
+        }
+
+        let value = raw as f64 / 10_f64.powi(scale);
+        Some(value)
+    }
+
+    fn remove_duplicate_data<'a>(
+        records: &'a Vec<&'a NatMessageReceive>,
+    ) -> Vec<&'a NatMessageReceive> {
+        let mut seen_ids: HashMap<String, &NatMessageReceive> =
+            HashMap::<String, &'a NatMessageReceive>::new();
 
         for record in records {
             let primary_key = match &record.primary_key {
@@ -147,12 +166,13 @@ impl PostgresDestination {
                 None => continue, // Skip records without primary key
             };
             if !seen_ids.contains_key(&primary_key.clone()) {
-                seen_ids.insert(primary_key.clone(),record);
-            }
-            else {
+                seen_ids.insert(primary_key.clone(), record);
+            } else {
                 let existing_record = seen_ids.get(&primary_key.clone()).unwrap();
                 if record.index > existing_record.index {
-                    seen_ids.entry(primary_key.clone()).and_modify(|e| *e = record);
+                    seen_ids
+                        .entry(primary_key.clone())
+                        .and_modify(|e| *e = record);
                 }
             }
         }
@@ -166,7 +186,6 @@ impl PostgresDestination {
         columns_raw: &Vec<&NatMessageReceive>,
         pool: &PgPool,
     ) {
-
         let columns = Self::remove_duplicate_data(columns_raw);
         let column_active = columns[0];
         let max_records = column_active.table_value.len();
@@ -199,11 +218,37 @@ impl PostgresDestination {
         s.push_str(" )  SELECT * FROM unnest( ");
         for (i, v) in colum_keys.clone().iter().enumerate() {
             let data_model = column_active.table_value.get(v).unwrap();
+
+            // Check if timestamp type needs TEXT[] cast for infinity values
+            let needs_text_cast = if data_model.simple_type == "TIMESTAMPTZ"
+                || data_model.simple_type == "TIMESTAMP"
+            {
+                columns.iter().any(|col_info| {
+                    if let Some(data) = col_info.table_value.get(v) {
+                        let val_str = data.value.as_str().unwrap_or("");
+                        val_str == "-infinity" || val_str == "infinity"
+                    } else {
+                        false
+                    }
+                })
+            } else {
+                false
+            };
+
+            let type_cast =
+                if data_model.simple_type == "NUMERIC" || data_model.simple_type == "DECIMAL" {
+                    // Cast from TEXT[] to NUMERIC[] for proper handling
+                    format!("${}::TEXT[]::{}[]", i + 1, data_model.simple_type)
+                } else if needs_text_cast {
+                    // Cast from TEXT[] to TIMESTAMP[] for infinity values
+                    format!("${}::TEXT[]::{}[]", i + 1, data_model.simple_type)
+                } else {
+                    format!("${}::{}[]", i + 1, data_model.simple_type)
+                };
             s.push_str(
                 format!(
-                    "${}::{}[] {} ",
-                    i + 1,
-                    data_model.simple_type,
+                    "{} {} ",
+                    type_cast,
                     if i < max_records.clone() - 1 { "," } else { "" }
                 )
                 .as_str(),
@@ -239,7 +284,8 @@ impl PostgresDestination {
             let values: Vec<Value> = columns
                 .iter()
                 .map(|col_info| {
-                    col_info.table_value
+                    col_info
+                        .table_value
                         .get(&column)
                         .map(|data| data.value.clone())
                         .unwrap_or(Value::Null)
@@ -276,53 +322,85 @@ impl PostgresDestination {
                 "BIGINT" => {
                     let bigint_values: Vec<Option<i64>> = values
                         .iter()
-                        .map(|v| {
-                            if v.is_null() {
-                                None
-                            } else {
-                                v.as_i64()
-                            }
-                        })
+                        .map(|v| if v.is_null() { None } else { v.as_i64() })
                         .collect();
                     query = query.bind(bigint_values);
                 }
                 "DOUBLE PRECISION" | "REAL" => {
                     let float_values: Vec<Option<f64>> = values
                         .iter()
-                        .map(|v| {
-                            if v.is_null() {
-                                None
-                            } else {
-                                v.as_f64()
-                            }
-                        })
+                        .map(|v| if v.is_null() { None } else { v.as_f64() })
                         .collect();
                     query = query.bind(float_values);
                 }
                 "BOOLEAN" => {
                     let bool_values: Vec<Option<bool>> = values
                         .iter()
-                        .map(|v| {
-                            if v.is_null() {
-                                None
-                            } else {
-                                v.as_bool()
-                            }
-                        })
+                        .map(|v| if v.is_null() { None } else { v.as_bool() })
                         .collect();
                     query = query.bind(bool_values);
                 }
-                "TIMESTAMPTZ" | "TIMESTAMP" => {
-                    let timestamp_values: Vec<Option<DateTime<Utc>>> = values
+                "NUMERIC" | "DECIMAL" => {
+                    let numeric_values: Vec<Option<String>> = values
                         .iter()
                         .map(|v| {
                             if v.is_null() {
-                                None
-                            } else {
-                                v.as_str()
-                                    .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
-                                    .map(|dt| dt.with_timezone(&Utc))
+                                return None;
                             }
+                            if let Ok(decimal_model) =
+                                serde_json::from_value::<DecimalModel>(v.clone())
+                            {
+                                if let Some(f64_value) = Self::convert_base64_to_decimal(
+                                    &decimal_model.value,
+                                    decimal_model.scale,
+                                ) {
+                                    return Some(f64_value.to_string());
+                                }
+                            }
+                            if let Some(num) = v.as_f64() {
+                                Some(num.to_string())
+                            } else if let Some(num) = v.as_i64() {
+                                Some(num.to_string())
+                            } else {
+                                v.as_str().map(|s| s.to_string())
+                            }
+                        })
+                        .collect();
+                    query = query.bind(numeric_values);
+                }
+                "TIMESTAMPTZ" | "TIMESTAMP" => {
+                    let timestamp_values: Vec<Option<String>> = values
+                        .iter()
+                        .map(|v| {
+                            if v.is_null() {
+                                return None;
+                            }
+
+                            let str_value = v.as_str().unwrap_or("");
+
+                            // Keep infinity values as-is
+                            if str_value == "-infinity" || str_value == "infinity" {
+                                return Some(str_value.to_string());
+                            }
+
+                            // Try to parse the timestamp and check year
+                            if let Ok(dt) = DateTime::parse_from_rfc3339(str_value) {
+                                let year = dt.year();
+                                let month = dt.month();
+                                let day = dt.day();
+                                let hour = dt.hour();
+                                let minute = dt.minute();
+                                let second = dt.second();
+
+                                if year < 1900 {
+                                    // Set to 1900-01-01 00:00:00 UTC
+                                    return Some(format!("1900-{}-{}T{}:{}:{}", month, day, hour, minute, second));
+                                }
+                                return Some(dt.to_rfc3339());
+                            }
+
+                            // If parsing fails, return as-is
+                            Some(str_value.to_string())
                         })
                         .collect();
                     query = query.bind(timestamp_values);
@@ -377,7 +455,6 @@ impl PostgresDestination {
                 }
             }
         }
-
         query.execute(pool).await.expect("Failed to insert values");
     }
 
