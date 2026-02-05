@@ -36,5 +36,8 @@ RUN apt-get update && \
 # Copy the binary from builder
 COPY --from=builder /app/target/release/cdcsink /usr/local/bin/cdcsink
 
+# Set environment to enable Rust panic messages
+ENV RUST_BACKTRACE=1
+
 # Set the binary as entrypoint
 ENTRYPOINT ["cdcsink"]

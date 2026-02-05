@@ -138,12 +138,36 @@ impl PostgresDestination {
         }
     }
 
+    fn remove_duplicate_data<'a>(records: &'a Vec<&'a NatMessageReceive>) -> Vec<&'a NatMessageReceive> {
+        let mut seen_ids: HashMap<String, &NatMessageReceive> = HashMap::<String, &'a NatMessageReceive>::new();
+
+        for record in records {
+            let primary_key = match &record.primary_key {
+                Some(pk) => pk,
+                None => continue, // Skip records without primary key
+            };
+            if !seen_ids.contains_key(&primary_key.clone()) {
+                seen_ids.insert(primary_key.clone(),record);
+            }
+            else {
+                let existing_record = seen_ids.get(&primary_key.clone()).unwrap();
+                if record.index > existing_record.index {
+                    seen_ids.entry(primary_key.clone()).and_modify(|e| *e = record);
+                }
+            }
+        }
+
+        seen_ids.values().cloned().collect()
+    }
+
     pub async fn insert_value(
         &self,
         table_name: &String,
-        columns: &Vec<&NatMessageReceive>,
+        columns_raw: &Vec<&NatMessageReceive>,
         pool: &PgPool,
     ) {
+
+        let columns = Self::remove_duplicate_data(columns_raw);
         let column_active = columns[0];
         let max_records = column_active.table_value.len();
         let mut s = String::from("INSERT INTO ");
@@ -195,10 +219,13 @@ impl PostgresDestination {
                     "{} = EXCLUDED.{} {}",
                     Self::quote_identifier(column),
                     Self::quote_identifier(column),
-                    if i < max_records.clone() - 2 { "," } else { "" }
+                    if i < max_records.clone() - 1 { "," } else { "" }
                 )
                 .as_str(),
             );
+        }
+        if s.ends_with(",") {
+            s.pop(); // Remove trailing comma
         }
         // Build typed value vectors based on simple_type
         let mut query = sqlx::query(&s);
@@ -208,9 +235,15 @@ impl PostgresDestination {
             let simple_type = &data_model.simple_type;
 
             // Collect values from all records for this column
+            // Use NULL if column doesn't exist in a particular record
             let values: Vec<Value> = columns
                 .iter()
-                .map(|col_info| col_info.table_value.get(&column).unwrap().value.clone())
+                .map(|col_info| {
+                    col_info.table_value
+                        .get(&column)
+                        .map(|data| data.value.clone())
+                        .unwrap_or(Value::Null)
+                })
                 .collect();
             // Bind based on the PostgreSQL type
             match simple_type.as_str() {

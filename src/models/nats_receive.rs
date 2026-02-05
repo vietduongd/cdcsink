@@ -21,9 +21,11 @@ pub struct NatsReceive {
 }
 
 pub struct NatMessageReceive {
+    pub index: i64,
     pub message: Message,
     pub table_name: String,
     pub table_value: HashMap<String, DataModel>,
+    pub primary_key: Option<String>,
 }
 
 impl NatsReceive {
@@ -76,8 +78,8 @@ impl NatsReceive {
             .take(100);
 
         let mut received_messages: Vec<NatMessageReceive> = Vec::new();
+        let mut counter = 0;
         while let Some(Ok(message)) = messages.next().await {
-          
             let data_record: DataRecord = serde_json::from_slice(&message.payload)
                 .map_err(|e| format!("Failed to deserialize message payload: {}", e))?;
 
@@ -85,15 +87,23 @@ impl NatsReceive {
                 .get_table_name()
                 .ok_or("Failed to get table name from data record")?;
 
-            let table_schema = data_record
+            let table_value = data_record
                 .get_table_structure()
                 .ok_or("Failed to get table structure from data record")?;
+
+            let primary_key = match table_value.get("id") {
+                Some(op) => Some(op.value.to_string()),
+                None => continue,
+            };
 
             received_messages.push(NatMessageReceive {
                 message,
                 table_name,
-                table_value: table_schema,
+                table_value,
+                index: counter,
+                primary_key: primary_key,
             });
+            counter += 1;
         }
 
         Ok(received_messages)
