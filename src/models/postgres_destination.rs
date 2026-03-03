@@ -42,7 +42,7 @@ impl PostgresDestination {
                 last_updated TIMESTAMP NOT NULL DEFAULT NOW(),
                 PRIMARY KEY (schema_name, table_name, column_name)
             )",
-            "public"
+            Self::quote_identifier(&self.schema_expect.clone())
         );
 
         sqlx::query(&query)
@@ -394,7 +394,10 @@ impl PostgresDestination {
 
                                 if year < 1900 {
                                     // Set to 1900-01-01 00:00:00 UTC
-                                    return Some(format!("1900-{}-{}T{}:{}:{}", month, day, hour, minute, second));
+                                    return Some(format!(
+                                        "1900-{}-{}T{}:{}:{}",
+                                        month, day, hour, minute, second
+                                    ));
                                 }
                                 return Some(dt.to_rfc3339());
                             }
