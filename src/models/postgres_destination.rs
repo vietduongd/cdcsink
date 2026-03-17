@@ -145,9 +145,23 @@ impl PostgresDestination {
             .decode(base64_value)
             .expect("invalid base64");
 
+        if bytes.is_empty() {
+            return Some(0.0);
+        }
+
+        let num_bytes = bytes.len();
         let mut raw: i64 = 0;
-        for b in bytes {
-            raw = (raw << 8) | b as i64;
+        for b in &bytes {
+            raw = (raw << 8) | (*b as i64);
+        }
+
+        // Sign-extend: nếu bit cao nhất của byte đầu là 1 thì đây là số âm
+        if bytes[0] & 0x80 != 0 {
+            // Điền 1 vào các bit cao hơn num_bytes*8
+            let bits = num_bytes * 8;
+            if bits < 64 {
+                raw |= !((1i64 << bits) - 1);
+            }
         }
 
         let value = raw as f64 / 10_f64.powi(scale);
@@ -306,7 +320,7 @@ impl PostgresDestination {
                         .collect();
                     query = query.bind(text_values);
                 }
-                "INTEGER" | "SMALLINT" => {
+                "INTEGER" => {
                     let int_values: Vec<Option<i32>> = values
                         .iter()
                         .map(|v| {
@@ -314,6 +328,19 @@ impl PostgresDestination {
                                 None
                             } else {
                                 v.as_i64().map(|i| i as i32)
+                            }
+                        })
+                        .collect();
+                    query = query.bind(int_values);
+                }
+                "SMALLINT" => {
+                    let int_values: Vec<Option<i16>> = values
+                        .iter()
+                        .map(|v| {
+                            if v.is_null() {
+                                None
+                            } else {
+                                v.as_i64().map(|i| i as i16)
                             }
                         })
                         .collect();
