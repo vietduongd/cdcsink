@@ -71,6 +71,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
         for msg in &messages {
             let table_name = &msg.table_name;
             if !schema_cache.contains_key(table_name) {
+                // Table chưa tồn tại: nếu message_active đang có dữ liệu thì insert trước
+                if let Some(buffered) = message_active.remove(table_name) {
+                    if !buffered.is_empty() {
+                        pg_destination
+                            .insert_value(table_name, &buffered, &pg_pool)
+                            .await;
+                    }
+                }
                 pg_destination
                     .create_table_if_not_exists_query(
                         &database_schema_expected.clone(),
@@ -83,6 +91,38 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     table_name.clone(),
                     msg.table_value.keys().cloned().collect(),
                 );
+            } else {
+                // Table đã tồn tại: kiểm tra xem có column mới không
+                let cached_columns = schema_cache.get_mut(table_name).unwrap();
+                let new_columns: Vec<(&String, &crate::models::DataModel)> = msg
+                    .table_value
+                    .iter()
+                    .filter(|(col_name, _)| !cached_columns.contains(*col_name))
+                    .collect();
+
+                if !new_columns.is_empty() {
+                    // Có column mới: nếu message_active đang có dữ liệu thì insert trước
+                    if let Some(buffered) = message_active.remove(table_name) {
+                        if !buffered.is_empty() {
+                            pg_destination
+                                .insert_value(table_name, &buffered, &pg_pool)
+                                .await;
+                        }
+                    }
+                    // Tạo các column mới
+                    for (col_name, col_type) in &new_columns {
+                        pg_destination
+                            .add_column_if_not_exists(
+                                &database_schema_expected,
+                                table_name,
+                                col_name,
+                                col_type,
+                                &pg_pool,
+                            )
+                            .await;
+                        cached_columns.insert(col_name.to_string());
+                    }
+                }
             }
             message_active
                 .entry(table_name.clone())
@@ -97,6 +137,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         nats_info.ack_message(&messages).await?;
         counter += 1;
         println!("Loop count: {}, at {}", counter, Local::now());
+        println!("Message count: {}, at {}", messages.len(), Local::now());
         println!(" ")
     }
     Ok(())

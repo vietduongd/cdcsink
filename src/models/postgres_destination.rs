@@ -139,6 +139,53 @@ impl PostgresDestination {
         }
     }
 
+    pub async fn add_column_if_not_exists(
+        &self,
+        schema_name: &str,
+        table_name: &str,
+        col_name: &str,
+        col_type: &DataModel,
+        pool: &PgPool,
+    ) {
+        let alter_query = format!(
+            "ALTER TABLE {}.{} ADD COLUMN IF NOT EXISTS {} {}",
+            Self::quote_identifier(schema_name),
+            Self::quote_identifier(table_name),
+            Self::quote_identifier(col_name),
+            col_type.data_type,
+        );
+        if let Err(e) = sqlx::query(&alter_query).execute(pool).await {
+            eprintln!(
+                "Failed to add column {}.{}.{}: {}",
+                schema_name, table_name, col_name, e
+            );
+        }
+
+        // Cập nhật metadata
+        let insert_query = format!(
+            r#"INSERT INTO {}."_cdc_schema_metadata" (schema_name, table_name, column_name, data_type, nullable)
+               VALUES ($1, $2, $3, $4, $5)
+               ON CONFLICT (schema_name, table_name, column_name)
+               DO UPDATE SET data_type = EXCLUDED.data_type, nullable = EXCLUDED.nullable, last_updated = NOW()"#,
+            Self::quote_identifier(&self.schema_expect.clone())
+        );
+        if let Err(e) = sqlx::query(&insert_query)
+            .bind(&self.schema_expect)
+            .bind(table_name)
+            .bind(col_name)
+            .bind(&col_type.data_type)
+            .bind(col_type.nullable)
+            .execute(pool)
+            .await
+        {
+            eprintln!(
+                "Failed to upsert schema metadata for {}.{}.{}: {}",
+                schema_name, table_name, col_name, e
+            );
+        }
+    }
+
+
     fn convert_base64_to_decimal(base64_value: &str, scale: i32) -> Option<f64> {
         // Decode base64
         let bytes = general_purpose::STANDARD
