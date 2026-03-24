@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::{collections::HashMap, result};
+use std::collections::HashMap;
 
 use crate::models::DataModel;
 
@@ -284,7 +284,8 @@ impl DataRecord {
                     Value::Number(n) => {
                         if let Some(timestamp) = n.as_i64() {
                             let datetime = match data_type {
-                                "io.debezium.time.Timestamp" | "io.debezium.time.ZonedTimestamp" => {
+                                "io.debezium.time.Timestamp"
+                                | "io.debezium.time.ZonedTimestamp" => {
                                     // milliseconds since epoch
                                     chrono::DateTime::from_timestamp_millis(timestamp)
                                 }

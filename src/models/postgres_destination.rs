@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use base64::{Engine, engine::general_purpose};
-use chrono::{DateTime, Datelike, Timelike, Utc};
+use chrono::{DateTime, Datelike, Timelike};
 use serde_json::Value;
 use sqlx::{PgPool, Row, postgres::PgPoolOptions, types::Json};
 use uuid::Uuid;
@@ -184,7 +184,6 @@ impl PostgresDestination {
             );
         }
     }
-
 
     fn convert_base64_to_decimal(base64_value: &str, scale: i32) -> Option<f64> {
         // Decode base64

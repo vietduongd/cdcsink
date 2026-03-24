@@ -1,8 +1,4 @@
-﻿use std::{
-    collections::{HashMap, HashSet},
-    env,
-    error::Error,
-};
+﻿use std::{collections::HashMap, env, error::Error};
 
 use chrono::Local;
 use dotenvy::dotenv;
