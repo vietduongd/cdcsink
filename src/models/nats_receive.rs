@@ -1,6 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
-    str::from_utf8,
+    str::from_utf8, time::Duration,
 };
 
 use async_nats::{
@@ -79,11 +79,13 @@ impl NatsReceive {
         &self,
         consumer: &mut PullConsumer,
     ) -> Result<Vec<NatMessageReceive>, String> {
-        let mut messages = consumer
+       let mut messages = consumer
+            .fetch()
+            .max_messages(self.number_pull_object)
+            .expires(Duration::from_secs(5)) // 👈 MaxWait
             .messages()
             .await
-            .map_err(|e| format!("Failed to receive messages: {}", e))?
-            .take(self.number_pull_object);
+            .map_err(|e| format!("Failed to receive messages: {}", e))?;
 
         let mut received_messages: Vec<NatMessageReceive> = Vec::new();
         let mut counter = 0;

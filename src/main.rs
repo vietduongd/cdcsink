@@ -55,17 +55,22 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .await
         .map_err(|e| Box::<dyn Error>::from(e))?;
 
-    let mut counter = 0;
     let mut schema_cache = pg_destination
         .get_schema_info(&pg_pool)
         .await
         .map_err(|e| Box::<dyn Error>::from(e))?;
     loop {
-        println!("Waiting for messages at {}", Local::now());
         let messages = nats_info.receive_messages(&mut consumer).await?;
+        if messages.is_empty() {
+            continue;
+        }
+        println!("Received {} messages at {}", messages.len(), Local::now());
         let mut message_active: HashMap<String, Vec<&NatMessageReceive>> = HashMap::new();
         for msg in &messages {
             let table_name = &msg.table_name;
+            if table_name.ends_with("_resync") {
+                continue;
+            }
             if !schema_cache.contains_key(table_name) {
                 // Table chưa tồn tại: nếu message_active đang có dữ liệu thì insert trước
                 if let Some(buffered) = message_active.remove(table_name) {
@@ -131,10 +136,5 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 .await;
         }
         nats_info.ack_message(&messages).await?;
-        counter += 1;
-        println!("Loop count: {}, at {}", counter, Local::now());
-        println!("Message count: {}, at {}", messages.len(), Local::now());
-        println!(" ")
     }
-    Ok(())
 }
