@@ -227,15 +227,24 @@ impl DataRecord {
 
     fn look_up_data_type(data_type: &str, value: &Value) -> Option<(String, String, Value)> {
         match data_type {
-            "int8" => Some(("BIGINT".to_string(), "BIGINT".to_string(), value.clone())),
+            "int8" => Some((
+                "SMALLINT".to_string(),
+                "SMALLINT".to_string(),
+                value.clone(),
+            )),
             "int16" => Some((
                 "SMALLINT".to_string(),
                 "SMALLINT".to_string(),
                 value.clone(),
             )),
             "int32" => Some(("INTEGER".to_string(), "INTEGER".to_string(), value.clone())),
+            "int" => Some(("INTEGER".to_string(), "INTEGER".to_string(), value.clone())),
             "int64" => Some(("BIGINT".to_string(), "BIGINT".to_string(), value.clone())),
-            "float" => Some(("BIGINT".to_string(), "BIGINT".to_string(), value.clone())),
+            "float" => Some((
+                "DOUBLE PRECISION".to_string(),
+                "DOUBLE PRECISION".to_string(),
+                value.clone(),
+            )),
             "float32" => Some(("REAL".to_string(), "REAL".to_string(), value.clone())),
             "float64" => Some((
                 "DOUBLE PRECISION".to_string(),

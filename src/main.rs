@@ -67,11 +67,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
         println!("Received {} messages at {}", messages.len(), Local::now());
         let mut message_active: HashMap<String, Vec<&NatMessageReceive>> = HashMap::new();
         for msg in &messages {
-            let mut table_name = msg.table_name.clone();
-            if let Some(stripped) = table_name.strip_suffix("_resync") {
-                table_name = stripped.to_string();
+            let mut table_name_new = msg.table_name.clone();
+            if let Some(stripped) = table_name_new.strip_suffix("_resync") {
+                table_name_new = stripped.to_string();
             }
-            let table_name = &table_name;
+            let table_name = &table_name_new;
             if !schema_cache.contains_key(table_name) {
                 // Table chưa tồn tại: nếu message_active đang có dữ liệu thì insert trước
                 if let Some(buffered) = message_active.remove(table_name) {
