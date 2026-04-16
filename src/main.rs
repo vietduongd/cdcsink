@@ -71,6 +71,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             if table_name.ends_with("_resync") {
                 continue;
             }
+
             if !schema_cache.contains_key(table_name) {
                 // Table chưa tồn tại: nếu message_active đang có dữ liệu thì insert trước
                 if let Some(buffered) = message_active.remove(table_name) {

@@ -247,7 +247,80 @@ impl PostgresDestination {
         pool: &PgPool,
     ) {
         let columns = Self::remove_duplicate_data(columns_raw);
-        let column_active = columns[0];
+        if columns.is_empty() {
+            return;
+        }
+
+        // Tách message delete và upsert
+        let (to_delete, to_upsert): (Vec<&NatMessageReceive>, Vec<&NatMessageReceive>) =
+            columns.into_iter().partition(|msg| {
+                msg.table_value
+                    .get("_PEERDB_IS_DELETED")
+                    .and_then(|dm| dm.value.as_bool())
+                    .unwrap_or(false)
+            });
+
+        // Xử lý delete
+        if !to_delete.is_empty() {
+            let id_data = to_delete[0]
+                .table_value
+                .get("id")
+                .expect("Missing id column for delete");
+            let simple_type = &id_data.simple_type;
+
+            let delete_query_str = format!(
+                "DELETE FROM {}.{} WHERE \"id\" = ANY($1::{}[]);",
+                self.schema_expect,
+                Self::quote_identifier(table_name),
+                simple_type
+            );
+
+            let ids: Vec<Value> = to_delete
+                .iter()
+                .map(|m| m.table_value.get("id").unwrap().value.clone())
+                .collect();
+
+            let mut q = sqlx::query(&delete_query_str);
+
+            match simple_type.as_str() {
+                "TEXT" => {
+                    let vals: Vec<Option<String>> = ids
+                        .iter()
+                        .map(|v| v.as_str().map(|s| s.to_string()))
+                        .collect();
+                    q = q.bind(vals);
+                }
+                "INTEGER" => {
+                    let vals: Vec<Option<i32>> =
+                        ids.iter().map(|v| v.as_i64().map(|i| i as i32)).collect();
+                    q = q.bind(vals);
+                }
+                "BIGINT" => {
+                    let vals: Vec<Option<i64>> = ids.iter().map(|v| v.as_i64()).collect();
+                    q = q.bind(vals);
+                }
+                "UUID" => {
+                    let vals: Vec<Option<Uuid>> = ids
+                        .iter()
+                        .map(|v| v.as_str().and_then(|s| Uuid::parse_str(s).ok()))
+                        .collect();
+                    q = q.bind(vals);
+                }
+                _ => {
+                    let vals: Vec<Option<String>> = ids.iter().map(|v| Some(v.to_string())).collect();
+                    q = q.bind(vals);
+                }
+            }
+            if let Err(e) = q.execute(pool).await {
+                eprintln!("Failed to execute delete for table {}: {}", table_name, e);
+            }
+        }
+
+        if to_upsert.is_empty() {
+            return;
+        }
+
+        let column_active = to_upsert[0];
         let max_records = column_active.table_value.len();
         let mut s = String::from("INSERT INTO ");
         s.push_str(
@@ -283,7 +356,7 @@ impl PostgresDestination {
             let needs_text_cast = if data_model.simple_type == "TIMESTAMPTZ"
                 || data_model.simple_type == "TIMESTAMP"
             {
-                columns.iter().any(|col_info| {
+                to_upsert.iter().any(|col_info| {
                     if let Some(data) = col_info.table_value.get(v) {
                         let val_str = data.value.as_str().unwrap_or("");
                         val_str == "-infinity" || val_str == "infinity"
@@ -341,7 +414,7 @@ impl PostgresDestination {
 
             // Collect values from all records for this column
             // Use NULL if column doesn't exist in a particular record
-            let values: Vec<Value> = columns
+            let values: Vec<Value> = to_upsert
                 .iter()
                 .map(|col_info| {
                     col_info
