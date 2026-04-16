@@ -254,10 +254,20 @@ impl PostgresDestination {
         // Tách message delete và upsert
         let (to_delete, to_upsert): (Vec<&NatMessageReceive>, Vec<&NatMessageReceive>) =
             columns.into_iter().partition(|msg| {
-                msg.table_value
+                let is_deleted_peerdb = msg
+                    .table_value
                     .get("_PEERDB_IS_DELETED")
                     .and_then(|dm| dm.value.as_bool())
-                    .unwrap_or(false)
+                    .unwrap_or(false);
+
+                let is_deleted_status = msg
+                    .table_value
+                    .get("Status")
+                    .and_then(|dm| dm.value.as_str())
+                    .map(|s| s.to_uppercase() == "DELETED" || s.to_uppercase() == "DELETE")
+                    .unwrap_or(false);
+
+                is_deleted_peerdb || is_deleted_status
             });
 
         // Xử lý delete
@@ -307,7 +317,8 @@ impl PostgresDestination {
                     q = q.bind(vals);
                 }
                 _ => {
-                    let vals: Vec<Option<String>> = ids.iter().map(|v| Some(v.to_string())).collect();
+                    let vals: Vec<Option<String>> =
+                        ids.iter().map(|v| Some(v.to_string())).collect();
                     q = q.bind(vals);
                 }
             }
