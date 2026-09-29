@@ -228,6 +228,8 @@ pub struct TypeError {
 pub struct MatchOutcome {
     pub matched: bool,
     pub type_errors: Vec<TypeError>,
+    /// Cột trong `where` không có trong message (thường do gõ sai tên) làm điều kiện sai.
+    pub missing_columns: Vec<String>,
 }
 
 impl TableConfig {
@@ -249,13 +251,19 @@ impl TableConfig {
     pub fn matches(&self, row: &HashMap<String, DataModel>) -> MatchOutcome {
         let mut matched = true;
         let mut type_errors = Vec::new();
+        let mut missing_columns = Vec::new();
         for condition in &self.conditions {
             let actual = resolve_key(row, &condition.column)
                 .and_then(|key| row.get(key))
                 .map(|data| &data.value);
             match eval_condition(condition, actual) {
                 Ok(true) => {}
-                Ok(false) => matched = false,
+                Ok(false) => {
+                    matched = false;
+                    if actual.is_none() {
+                        missing_columns.push(condition.column.clone());
+                    }
+                }
                 Err(detail) => {
                     matched = false;
                     type_errors.push(TypeError {
@@ -269,6 +277,7 @@ impl TableConfig {
         MatchOutcome {
             matched,
             type_errors,
+            missing_columns,
         }
     }
 }
@@ -286,6 +295,7 @@ pub fn classify(
     let outcome = table.map(|t| t.matches(row)).unwrap_or(MatchOutcome {
         matched: true,
         type_errors: Vec::new(),
+        missing_columns: Vec::new(),
     });
     let action = if is_deleted || !outcome.matched {
         RowAction::Delete
@@ -596,7 +606,7 @@ tables:
     fn no_conditions_always_matches() {
         let cfg = config("tables:\n  t:\n    exclude: [x]\n");
         let outcome = cfg.table("t").unwrap().matches(&row(&[("id", json!(1))]));
-        assert_eq!(outcome, MatchOutcome { matched: true, type_errors: vec![] });
+        assert_eq!(outcome, MatchOutcome { matched: true, type_errors: vec![], missing_columns: vec![] });
     }
 
     #[test]
@@ -659,7 +669,25 @@ tables:
         assert!(check("      - { column: deleted_at, op: is_null }\n", &missing).matched);
         assert!(!check("      - { column: deleted_at, op: not_null }\n", &missing).matched);
         let outcome = check("      - { column: deleted_at, op: eq, value: x }\n", &missing);
-        assert_eq!(outcome, MatchOutcome { matched: false, type_errors: vec![] });
+        assert_eq!(outcome, MatchOutcome { matched: false, type_errors: vec![], missing_columns: vec!["deleted_at".to_string()] });
+    }
+
+    // Tên cột sai trong where làm mọi dòng bị xóa: phải được báo để log
+    #[test]
+    fn missing_where_column_is_reported_but_null_is_not() {
+        let outcome = check("      - { column: tenant_idd, op: eq, value: 5 }\n", &[("tenant_id", json!(5))]);
+        assert!(!outcome.matched);
+        assert_eq!(outcome.missing_columns, vec!["tenant_idd".to_string()]);
+        assert!(outcome.type_errors.is_empty());
+
+        let outcome = check("      - { column: tenant_id, op: eq, value: 5 }\n", &[("tenant_id", Value::Null)]);
+        assert!(!outcome.matched);
+        assert!(outcome.missing_columns.is_empty());
+
+        // is_null trên cột thiếu vẫn khớp và không bị coi là lỗi
+        let outcome = check("      - { column: deleted_at, op: is_null }\n", &[("id", json!(1))]);
+        assert!(outcome.matched);
+        assert!(outcome.missing_columns.is_empty());
     }
 
     // Review Focus #3: "5" (chuỗi) so với cột số phải báo type error

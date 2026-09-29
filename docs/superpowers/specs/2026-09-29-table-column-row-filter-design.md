@@ -108,7 +108,7 @@ Không đụng I/O, ngoại trừ `load`.
   2. Gọi `get_table_structure()`. Message không có `id` vẫn bị bỏ qua như hiện tại.
   3. Gọi `classify(...)` để có `action`, rồi log lỗi kiểu nếu có.
   4. Gọi `retain_columns(...)`.
-- Sau mỗi batch: nếu một table có mọi message bị loại vì lỗi kiểu, in `WARNING: all N rows of table X rejected due to type mismatch in where`.
+- Sau mỗi batch: nếu một table có mọi message bị loại vì lỗi kiểu, in `WARNING: all N rows of table X rejected due to type mismatch or missing column in where`.
 
 ### 4.4 `main.rs`
 - Nạp `SyncConfig` nếu có `SYNC_CONFIG_PATH`, rồi log danh sách table đã cấu hình. Config lỗi thì thoát ngay. Không có biến thì in dòng log "not set" ở mục 1.

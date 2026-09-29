@@ -99,7 +99,7 @@ impl NatsReceive {
             .map_err(|e| format!("Failed to receive messages: {}", e))?;
 
         let mut received_messages: Vec<NatMessageReceive> = Vec::new();
-        // table -> (tổng số message, số message bị loại vì lỗi kiểu)
+        // table -> (tổng số message, số message bị loại vì lỗi kiểu hoặc thiếu cột)
         let mut type_rejections: HashMap<String, (usize, usize)> = HashMap::new();
         let mut counter = 0;
         while let Some(Ok(message)) = messages.next().await {
@@ -133,9 +133,20 @@ impl NatsReceive {
                     );
                 }
             }
+            for column in &outcome.missing_columns {
+                let key = format!("{}|{}|missing", table_name, column);
+                if logged_type_errors.insert(key) {
+                    eprintln!(
+                        "Sync filter column not found: table {} column {} (check the name in where; rows are deleted)",
+                        table_name, column
+                    );
+                }
+            }
             let stats = type_rejections.entry(table_name.clone()).or_insert((0, 0));
             stats.0 += 1;
-            if !outcome.matched && !outcome.type_errors.is_empty() {
+            if !outcome.matched
+                && (!outcome.type_errors.is_empty() || !outcome.missing_columns.is_empty())
+            {
                 stats.1 += 1;
             }
 
@@ -157,7 +168,7 @@ impl NatsReceive {
         for (table_name, (total, rejected)) in &type_rejections {
             if *total > 0 && total == rejected {
                 eprintln!(
-                    "WARNING: all {} rows of table {} rejected due to type mismatch in where",
+                    "WARNING: all {} rows of table {} rejected due to type mismatch or missing column in where",
                     total, table_name
                 );
             }
