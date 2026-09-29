@@ -1,9 +1,11 @@
+use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use serde::Deserialize;
 use serde_json::Value;
 
 use crate::models::DataModel;
+use crate::models::decimal::numeric_value;
 
 pub const ID_COLUMN: &str = "id";
 
@@ -200,6 +202,19 @@ fn is_scalar(v: &Value) -> bool {
     matches!(v, Value::Number(_) | Value::String(_) | Value::Bool(_))
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct TypeError {
+    pub column: String,
+    pub op: Op,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct MatchOutcome {
+    pub matched: bool,
+    pub type_errors: Vec<TypeError>,
+}
+
 impl TableConfig {
     /// Giữ lại các cột theo include/exclude. Cột `id` luôn được giữ.
     pub fn retain_columns(&self, row: &mut HashMap<String, DataModel>) {
@@ -214,6 +229,33 @@ impl TableConfig {
         let keep_selected = matches!(self.columns, ColumnSelection::Include(_));
         row.retain(|key, _| key == ID_COLUMN || selected.contains(key) == keep_selected);
     }
+
+    /// Xét toàn bộ điều kiện `where` (AND). Không short-circuit để thu đủ lỗi kiểu.
+    pub fn matches(&self, row: &HashMap<String, DataModel>) -> MatchOutcome {
+        let mut matched = true;
+        let mut type_errors = Vec::new();
+        for condition in &self.conditions {
+            let actual = resolve_key(row, &condition.column)
+                .and_then(|key| row.get(key))
+                .map(|data| &data.value);
+            match eval_condition(condition, actual) {
+                Ok(true) => {}
+                Ok(false) => matched = false,
+                Err(detail) => {
+                    matched = false;
+                    type_errors.push(TypeError {
+                        column: condition.column.clone(),
+                        op: condition.op,
+                        detail,
+                    });
+                }
+            }
+        }
+        MatchOutcome {
+            matched,
+            type_errors,
+        }
+    }
 }
 
 /// Tìm key trong map khớp `name`: chính xác trước, sau đó không phân biệt hoa thường.
@@ -223,6 +265,91 @@ fn resolve_key<'a, V>(map: &'a HashMap<String, V>, name: &str) -> Option<&'a Str
     }
     let lower = name.to_lowercase();
     map.keys().find(|key| key.to_lowercase() == lower)
+}
+
+fn eval_condition(condition: &Condition, actual: Option<&Value>) -> Result<bool, String> {
+    // NULL hoặc thiếu cột: chỉ is_null đúng
+    let actual = match actual {
+        None | Some(Value::Null) => return Ok(condition.op == Op::IsNull),
+        Some(value) => value,
+    };
+    match condition.op {
+        Op::IsNull => Ok(false),
+        Op::NotNull => Ok(true),
+        Op::Eq => values_equal(actual, &condition.value),
+        Op::Ne => values_equal(actual, &condition.value).map(|equal| !equal),
+        Op::In | Op::NotIn => {
+            let items = condition.value.as_array().map(Vec::as_slice).unwrap_or(&[]);
+            let mut found = false;
+            let mut comparable = false;
+            let mut last_error = None;
+            for item in items {
+                match values_equal(actual, item) {
+                    Ok(equal) => {
+                        comparable = true;
+                        found |= equal;
+                    }
+                    Err(e) => last_error = Some(e),
+                }
+            }
+            if !comparable {
+                return Err(last_error.unwrap_or_else(|| "empty value list".to_string()));
+            }
+            Ok(if condition.op == Op::In { found } else { !found })
+        }
+        Op::Gt | Op::Gte | Op::Lt | Op::Lte => {
+            let ordering = compare_order(actual, &condition.value)?;
+            Ok(match condition.op {
+                Op::Gt => ordering == Ordering::Greater,
+                Op::Gte => ordering != Ordering::Less,
+                Op::Lt => ordering == Ordering::Less,
+                _ => ordering != Ordering::Greater,
+            })
+        }
+    }
+}
+
+fn values_equal(actual: &Value, expected: &Value) -> Result<bool, String> {
+    if let (Some(a), Some(b)) = (numeric_value(actual), numeric_value(expected)) {
+        return Ok(a == b);
+    }
+    match (actual, expected) {
+        (Value::String(a), Value::String(b)) => Ok(a == b),
+        (Value::Bool(a), Value::Bool(b)) => Ok(a == b),
+        _ => Err(format!(
+            "cannot compare {} with {}",
+            value_kind(actual),
+            value_kind(expected)
+        )),
+    }
+}
+
+fn compare_order(actual: &Value, expected: &Value) -> Result<Ordering, String> {
+    if let (Some(a), Some(b)) = (numeric_value(actual), numeric_value(expected)) {
+        return a
+            .partial_cmp(&b)
+            .ok_or_else(|| "cannot order NaN".to_string());
+    }
+    match (actual, expected) {
+        (Value::String(a), Value::String(b)) => Ok(a.cmp(b)),
+        _ => Err(format!(
+            "cannot order {} against {}",
+            value_kind(actual),
+            value_kind(expected)
+        )),
+    }
+}
+
+fn value_kind(v: &Value) -> &'static str {
+    match v {
+        Value::Null => "null",
+        Value::Bool(_) => "boolean",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) if numeric_value(v).is_some() => "decimal",
+        Value::Object(_) => "object",
+    }
 }
 
 #[cfg(test)]
@@ -417,6 +544,113 @@ tables:
         let mut r = row(&[("id", json!(1)), ("msg", json!("x"))]);
         cfg.table("logs").unwrap().retain_columns(&mut r);
         assert_eq!(sorted_keys(&r), vec!["id", "msg"]);
+    }
+
+    fn table_with_where(conditions_yaml: &str) -> TableConfig {
+        let yaml = format!("tables:\n  t:\n    where:\n{}", conditions_yaml);
+        config(&yaml).table("t").unwrap().clone()
+    }
+
+    fn check(conditions_yaml: &str, pairs: &[(&str, Value)]) -> MatchOutcome {
+        table_with_where(conditions_yaml).matches(&row(pairs))
+    }
+
+    #[test]
+    fn no_conditions_always_matches() {
+        let cfg = config("tables:\n  t:\n    exclude: [x]\n");
+        let outcome = cfg.table("t").unwrap().matches(&row(&[("id", json!(1))]));
+        assert_eq!(outcome, MatchOutcome { matched: true, type_errors: vec![] });
+    }
+
+    #[test]
+    fn numeric_comparisons() {
+        let r = [("n", json!(5))];
+        assert!(check("      - { column: n, op: eq, value: 5 }\n", &r).matched);
+        assert!(check("      - { column: n, op: eq, value: 5.0 }\n", &r).matched);
+        assert!(!check("      - { column: n, op: ne, value: 5 }\n", &r).matched);
+        assert!(check("      - { column: n, op: gt, value: 4 }\n", &r).matched);
+        assert!(!check("      - { column: n, op: gt, value: 5 }\n", &r).matched);
+        assert!(check("      - { column: n, op: gte, value: 5 }\n", &r).matched);
+        assert!(check("      - { column: n, op: lt, value: 6 }\n", &r).matched);
+        assert!(!check("      - { column: n, op: lt, value: 5 }\n", &r).matched);
+        assert!(check("      - { column: n, op: lte, value: 5 }\n", &r).matched);
+    }
+
+    #[test]
+    fn string_comparisons_including_dates() {
+        let r = [("status", json!("paid")), ("created_at", json!("2025-03-01 10:00:00"))];
+        assert!(check("      - { column: status, op: eq, value: paid }\n", &r).matched);
+        // giá trị so chính xác, phân biệt hoa thường
+        assert!(!check("      - { column: status, op: eq, value: Paid }\n", &r).matched);
+        assert!(check("      - { column: status, op: in, value: [paid, shipped] }\n", &r).matched);
+        assert!(!check("      - { column: status, op: not_in, value: [paid, shipped] }\n", &r).matched);
+        assert!(check("      - { column: created_at, op: gte, value: \"2025-01-01\" }\n", &r).matched);
+        assert!(!check("      - { column: created_at, op: lt, value: \"2025-01-01\" }\n", &r).matched);
+    }
+
+    #[test]
+    fn boolean_comparisons() {
+        let r = [("active", json!(true))];
+        assert!(check("      - { column: active, op: eq, value: true }\n", &r).matched);
+        assert!(check("      - { column: active, op: ne, value: false }\n", &r).matched);
+        assert!(check("      - { column: active, op: in, value: [true] }\n", &r).matched);
+        let outcome = check("      - { column: active, op: gt, value: false }\n", &r);
+        assert!(!outcome.matched);
+        assert_eq!(outcome.type_errors.len(), 1);
+    }
+
+    // Review Focus #4: decimal Debezium so với số
+    #[test]
+    fn debezium_decimal_compares_numerically() {
+        let r = [("price", json!({"scale": 2, "value": "AeI="}))]; // 4.82
+        assert!(check("      - { column: price, op: gt, value: 4 }\n", &r).matched);
+        assert!(check("      - { column: price, op: eq, value: 4.82 }\n", &r).matched);
+        let neg = [("price", json!({"scale": 2, "value": "/h4="}))]; // -4.82
+        assert!(check("      - { column: price, op: lt, value: 0 }\n", &neg).matched);
+    }
+
+    #[test]
+    fn null_and_missing_columns() {
+        let null_row = [("deleted_at", Value::Null)];
+        assert!(check("      - { column: deleted_at, op: is_null }\n", &null_row).matched);
+        assert!(!check("      - { column: deleted_at, op: not_null }\n", &null_row).matched);
+        assert!(!check("      - { column: deleted_at, op: eq, value: x }\n", &null_row).matched);
+        assert!(!check("      - { column: deleted_at, op: ne, value: x }\n", &null_row).matched);
+        assert!(!check("      - { column: deleted_at, op: not_in, value: [x] }\n", &null_row).matched);
+
+        let missing: [(&str, Value); 0] = [];
+        assert!(check("      - { column: deleted_at, op: is_null }\n", &missing).matched);
+        assert!(!check("      - { column: deleted_at, op: not_null }\n", &missing).matched);
+        let outcome = check("      - { column: deleted_at, op: eq, value: x }\n", &missing);
+        assert_eq!(outcome, MatchOutcome { matched: false, type_errors: vec![] });
+    }
+
+    // Review Focus #3: "5" (chuỗi) so với cột số phải báo type error
+    #[test]
+    fn type_mismatch_is_false_and_reported() {
+        let outcome = check("      - { column: tenant_id, op: eq, value: \"5\" }\n", &[("tenant_id", json!(5))]);
+        assert!(!outcome.matched);
+        assert_eq!(outcome.type_errors.len(), 1);
+        assert_eq!(outcome.type_errors[0].column, "tenant_id");
+        assert_eq!(outcome.type_errors[0].op, Op::Eq);
+        assert!(outcome.type_errors[0].detail.contains("number"), "{:?}", outcome.type_errors[0]);
+
+        let outcome = check("      - { column: name, op: gt, value: 3 }\n", &[("name", json!("abc"))]);
+        assert!(!outcome.matched);
+        assert_eq!(outcome.type_errors.len(), 1);
+    }
+
+    #[test]
+    fn all_conditions_must_hold() {
+        let conds = "      - { column: tenant_id, op: eq, value: 5 }\n      - { column: status, op: in, value: [paid] }\n";
+        assert!(check(conds, &[("tenant_id", json!(5)), ("status", json!("paid"))]).matched);
+        assert!(!check(conds, &[("tenant_id", json!(5)), ("status", json!("new"))]).matched);
+        assert!(!check(conds, &[("tenant_id", json!(6)), ("status", json!("paid"))]).matched);
+    }
+
+    #[test]
+    fn where_column_names_match_case_insensitively() {
+        assert!(check("      - { column: tenantid, op: eq, value: 5 }\n", &[("TenantId", json!(5))]).matched);
     }
 
     #[test]
