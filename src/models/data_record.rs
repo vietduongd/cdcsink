@@ -186,11 +186,12 @@ impl DataRecord {
             if value.is_none() {
                 continue;
             }
-            let data_type = DataRecord::look_up_data_type(&field_type, value.unwrap()).unwrap_or((
-                "TEXT".to_string(),
-                "TEXT".to_string(),
-                Value::Null,
-            ));
+            let data_type = if field_type == "org.apache.kafka.connect.data.Decimal" {
+                Some(DataRecord::kafka_decimal(value.unwrap(), item.parameters.as_ref()))
+            } else {
+                DataRecord::look_up_data_type(&field_type, value.unwrap())
+            }
+            .unwrap_or(("TEXT".to_string(), "TEXT".to_string(), Value::Null));
 
             structure.insert(
                 field_name,
@@ -223,6 +224,23 @@ impl DataRecord {
             }
             _ => HashMap::new(),
         }
+    }
+
+    /// numeric(p,s) của Debezium: value là base64, scale nằm trong `parameters.scale`.
+    /// Chuyển về dạng `{scale, value}` giống VariableScaleDecimal để insert và bộ lọc dùng chung.
+    fn kafka_decimal(value: &Value, parameters: Option<&Value>) -> (String, String, Value) {
+        let scale = parameters
+            .and_then(|p| p.get("scale"))
+            .and_then(|s| match s {
+                Value::String(s) => s.parse::<i64>().ok(),
+                other => other.as_i64(),
+            })
+            .unwrap_or(0);
+        let result = match value {
+            Value::String(encoded) => serde_json::json!({ "scale": scale, "value": encoded }),
+            _ => value.clone(),
+        };
+        ("NUMERIC".to_string(), "NUMERIC".to_string(), result)
     }
 
     fn look_up_data_type(data_type: &str, value: &Value) -> Option<(String, String, Value)> {
@@ -342,5 +360,68 @@ impl DataRecord {
             }
             _ => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn record_with_field(field_schema: Value, after: Value) -> DataRecord {
+        serde_json::from_value(json!({
+            "schema": {
+                "type": "struct", "optional": false, "name": "t.Envelope", "version": 1,
+                "fields": [
+                    { "type": "struct", "optional": true, "field": "after", "fields": [
+                        { "type": "int32", "optional": false, "field": "id" },
+                        field_schema
+                    ]}
+                ]
+            },
+            "payload": {
+                "before": null,
+                "after": after,
+                "source": {
+                    "version": "2", "connector": "postgresql", "name": "s", "ts_ms": 0,
+                    "snapshot": "false", "db": "db", "schema": "public", "table": "orders"
+                },
+                "transaction": null,
+                "op": "c"
+            }
+        }))
+        .expect("valid Debezium record")
+    }
+
+    // numeric(p,s) của Debezium: base64 + scale trong parameters, không được thành NULL
+    #[test]
+    fn kafka_connect_decimal_keeps_value_and_scale() {
+        let record = record_with_field(
+            json!({
+                "type": "bytes", "optional": true, "field": "total",
+                "name": "org.apache.kafka.connect.data.Decimal", "version": 1,
+                "parameters": { "scale": "2", "connect.decimal.precision": "10" }
+            }),
+            json!({ "id": 1, "total": "AeI=" }),
+        );
+        let structure = record.get_table_structure().unwrap();
+        let total = structure.get("total").unwrap();
+        assert_eq!(total.simple_type, "NUMERIC");
+        assert_eq!(total.value, json!({ "scale": 2, "value": "AeI=" }));
+    }
+
+    #[test]
+    fn kafka_connect_decimal_null_stays_null() {
+        let record = record_with_field(
+            json!({
+                "type": "bytes", "optional": true, "field": "total",
+                "name": "org.apache.kafka.connect.data.Decimal", "version": 1,
+                "parameters": { "scale": "2" }
+            }),
+            json!({ "id": 1, "total": null }),
+        );
+        let structure = record.get_table_structure().unwrap();
+        assert_eq!(structure.get("total").unwrap().value, Value::Null);
+        assert_eq!(structure.get("total").unwrap().simple_type, "NUMERIC");
     }
 }
