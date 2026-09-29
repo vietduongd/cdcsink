@@ -8,6 +8,13 @@ use crate::models::DataModel;
 use crate::models::decimal::numeric_value;
 
 pub const ID_COLUMN: &str = "id";
+pub const DELETED_FLAG_COLUMN: &str = "_PEERDB_IS_DELETED";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RowAction {
+    Upsert,
+    Delete,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Op {
@@ -96,6 +103,14 @@ impl SyncConfig {
         let content = std::fs::read_to_string(path)
             .map_err(|e| format!("Cannot read sync config {}: {}", path, e))?;
         Self::from_yaml_str(&content)
+    }
+
+    /// Giá trị của env `SYNC_CONFIG_PATH`: không có hoặc rỗng → không dùng config.
+    pub fn from_env_value(path: Option<String>) -> Result<Option<SyncConfig>, String> {
+        match path {
+            Some(path) if !path.trim().is_empty() => Self::load(path.trim()).map(Some),
+            _ => Ok(None),
+        }
     }
 
     pub fn from_yaml_str(content: &str) -> Result<SyncConfig, String> {
@@ -256,6 +271,28 @@ impl TableConfig {
             type_errors,
         }
     }
+}
+
+/// Quyết định Upsert/Delete cho một message. Phải gọi TRƯỚC `retain_columns`
+/// để cờ delete và các cột bị loại vẫn dùng được trong `where`.
+pub fn classify(
+    row: &HashMap<String, DataModel>,
+    table: Option<&TableConfig>,
+) -> (RowAction, MatchOutcome) {
+    let is_deleted = row
+        .get(DELETED_FLAG_COLUMN)
+        .and_then(|data| data.value.as_bool())
+        .unwrap_or(false);
+    let outcome = table.map(|t| t.matches(row)).unwrap_or(MatchOutcome {
+        matched: true,
+        type_errors: Vec::new(),
+    });
+    let action = if is_deleted || !outcome.matched {
+        RowAction::Delete
+    } else {
+        RowAction::Upsert
+    };
+    (action, outcome)
 }
 
 /// Tìm key trong map khớp `name`: chính xác trước, sau đó không phân biệt hoa thường.
@@ -651,6 +688,68 @@ tables:
     #[test]
     fn where_column_names_match_case_insensitively() {
         assert!(check("      - { column: tenantid, op: eq, value: 5 }\n", &[("TenantId", json!(5))]).matched);
+    }
+
+    #[test]
+    fn classify_without_config_upserts() {
+        let (action, outcome) = classify(&row(&[("id", json!(1))]), None);
+        assert_eq!(action, RowAction::Upsert);
+        assert!(outcome.matched);
+    }
+
+    #[test]
+    fn classify_peerdb_deleted_flag_deletes() {
+        let r = row(&[("id", json!(1)), ("_PEERDB_IS_DELETED", json!(true))]);
+        assert_eq!(classify(&r, None).0, RowAction::Delete);
+        let r = row(&[("id", json!(1)), ("_PEERDB_IS_DELETED", json!(false))]);
+        assert_eq!(classify(&r, None).0, RowAction::Upsert);
+    }
+
+    #[test]
+    fn classify_by_where() {
+        let t = table_with_where("      - { column: status, op: eq, value: paid }\n");
+        assert_eq!(classify(&row(&[("id", json!(1)), ("status", json!("paid"))]), Some(&t)).0, RowAction::Upsert);
+        assert_eq!(classify(&row(&[("id", json!(1)), ("status", json!("new"))]), Some(&t)).0, RowAction::Delete);
+    }
+
+    #[test]
+    fn where_can_use_excluded_column_and_delete_survives_excluded_flag() {
+        let cfg = config(
+            r#"
+tables:
+  orders:
+    exclude: [tenant_id, _PEERDB_IS_DELETED]
+    where:
+      - { column: tenant_id, op: eq, value: 5 }
+"#,
+        );
+        let t = cfg.table("orders").unwrap();
+
+        // Thứ tự đúng như nats_receive: classify trước, retain_columns sau
+        let mut r = row(&[("id", json!(1)), ("tenant_id", json!(5)), ("_PEERDB_IS_DELETED", json!(false))]);
+        let (action, _) = classify(&r, Some(t));
+        t.retain_columns(&mut r);
+        assert_eq!(action, RowAction::Upsert);
+        assert_eq!(sorted_keys(&r), vec!["id"]);
+
+        let mut r = row(&[("id", json!(2)), ("tenant_id", json!(5)), ("_PEERDB_IS_DELETED", json!(true))]);
+        let (action, _) = classify(&r, Some(t));
+        t.retain_columns(&mut r);
+        assert_eq!(action, RowAction::Delete);
+    }
+
+    // Review Focus #1: SYNC_CONFIG_PATH rỗng coi như không đặt
+    #[test]
+    fn env_value_absent_or_blank_means_no_config() {
+        assert!(SyncConfig::from_env_value(None).unwrap().is_none());
+        assert!(SyncConfig::from_env_value(Some(String::new())).unwrap().is_none());
+        assert!(SyncConfig::from_env_value(Some("   ".into())).unwrap().is_none());
+    }
+
+    #[test]
+    fn env_value_with_missing_file_is_error() {
+        let err = SyncConfig::from_env_value(Some("does/not/exist.yaml".into())).unwrap_err();
+        assert!(err.contains("Cannot read sync config"), "{err}");
     }
 
     #[test]
