@@ -11,7 +11,11 @@ Cho phép cấu hình theo từng table nhận được từ CDC:
 1. **Chọn cột được sync**, bằng `include` hoặc `exclude`.
 2. **Lọc dòng theo điều kiện** (`where`). Dòng không khớp sẽ không có ở đích; nếu trước đó đã có thì bị xóa.
 
-Table không khai báo trong config được sync toàn bộ cột và toàn bộ dòng, giống hành vi hiện tại. Không đặt biến `SYNC_CONFIG_PATH` thì hệ thống chạy y như trước khi có tính năng này.
+Table không khai báo trong config được sync toàn bộ cột và toàn bộ dòng, giống hành vi hiện tại. Không đặt biến `SYNC_CONFIG_PATH` thì hệ thống chạy y như trước khi có tính năng này, và in một dòng log khi khởi động để tránh trường hợp quên cấu hình trên production:
+
+```
+SYNC_CONFIG_PATH not set: syncing ALL tables/columns/rows (no filter)
+```
 
 ## 2. Cấu hình
 
@@ -53,6 +57,22 @@ tables:
 - Tên table được so **sau khi bỏ hậu tố `_resync`**.
 - Tên table, tên cột trong `include`/`exclude` và `where.column` đều được so khớp chính xác trước; nếu không có thì so khớp không phân biệt hoa thường.
 - Nếu config có hai key table chỉ khác nhau về hoa thường (ví dụ `Orders` và `orders`), hệ thống báo lỗi khi khởi động.
+- Hệ thống không tự đổi giữa snake_case và CamelCase: `order_items` không khớp với `OrderItems`.
+- Key là tên table không kèm schema (`OrderItems`, không phải `public.OrderItems`) và không kèm `_resync`. Schema đích lấy từ `DATABASE_SCHEMA_EXPECT`.
+- Quy tắc không phân biệt hoa thường chỉ áp dụng cho **tên** table và cột. **Giá trị** trong `where` được so chính xác: `value: Paid` không khớp với dữ liệu `paid`.
+
+Ví dụ với table CamelCase:
+
+```yaml
+tables:
+  OrderItems:
+    include: [id, OrderId, ProductId, Quantity, UnitPrice]
+    where:
+      - { column: TenantId, op: eq, value: 5 }
+      - { column: Status,   op: in, value: [Paid, Shipped] }
+  UserAccounts:
+    exclude: [PasswordHash, SecurityStamp]
+```
 
 ## 3. Hành vi theo từng message
 
@@ -91,7 +111,7 @@ Không đụng I/O, ngoại trừ `load`.
 - Sau mỗi batch: nếu một table có mọi message bị loại vì lỗi kiểu, in `WARNING: all N rows of table X rejected due to type mismatch in where`.
 
 ### 4.4 `main.rs`
-- Nạp `SyncConfig` nếu có `SYNC_CONFIG_PATH`, rồi log danh sách table đã cấu hình. Config lỗi thì thoát ngay.
+- Nạp `SyncConfig` nếu có `SYNC_CONFIG_PATH`, rồi log danh sách table đã cấu hình. Config lỗi thì thoát ngay. Không có biến thì in dòng log "not set" ở mục 1.
 - Bỏ đoạn strip `_resync` vì đã chuyển sang 4.3.
 - Message có `action == Delete` bỏ qua phần kiểm tra và tạo table/cột. Nếu table không có trong `schema_cache` thì không đưa vào `message_active`.
 
@@ -102,7 +122,7 @@ Không đụng I/O, ngoại trừ `load`.
 ### 4.6 Dependency và file phụ
 - `Cargo.toml`: thêm `serde_yaml_ng`.
 - `.env.example`: thêm `SYNC_CONFIG_PATH`.
-- Thêm `sync_config.example.yaml`, có ghi chú cảnh báo về cột `NOT NULL`.
+- Thêm `sync_config.example.yaml`, có ghi chú cảnh báo về cột `NOT NULL`, kèm ví dụ table snake_case và CamelCase như ở mục 2.3.
 
 ## 5. Xử lý lỗi
 
