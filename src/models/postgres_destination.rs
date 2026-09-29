@@ -5,7 +5,10 @@ use serde_json::Value;
 use sqlx::{PgPool, Row, postgres::PgPoolOptions, types::Json};
 use uuid::Uuid;
 
-use crate::models::{DataModel, NatMessageReceive, decimal::decode_base64_decimal, models_info::DecimalModel};
+use crate::models::{
+    DataModel, NatMessageReceive, RowAction, decimal::decode_base64_decimal,
+    models_info::DecimalModel,
+};
 
 pub struct PostgresDestination {
     pub database_url: String,
@@ -223,12 +226,9 @@ impl PostgresDestination {
 
         // Tách message delete và upsert
         let (to_delete, to_upsert): (Vec<&NatMessageReceive>, Vec<&NatMessageReceive>) =
-            columns.into_iter().partition(|msg| {
-                msg.table_value
-                    .get("_PEERDB_IS_DELETED")
-                    .and_then(|dm| dm.value.as_bool())
-                    .unwrap_or(false)
-            });
+            columns
+                .into_iter()
+                .partition(|msg| msg.action == RowAction::Delete);
 
         // Xử lý delete
         if !to_delete.is_empty() {
@@ -240,7 +240,7 @@ impl PostgresDestination {
 
             let delete_query_str = format!(
                 "DELETE FROM {}.{} WHERE \"id\" = ANY($1::{}[]);",
-                self.schema_expect,
+                Self::quote_identifier(&self.schema_expect),
                 Self::quote_identifier(table_name),
                 simple_type
             );
@@ -296,7 +296,7 @@ impl PostgresDestination {
         s.push_str(
             format!(
                 "{}.{} (",
-                self.schema_expect.clone(),
+                Self::quote_identifier(&self.schema_expect),
                 Self::quote_identifier(table_name)
             )
             .as_str(),

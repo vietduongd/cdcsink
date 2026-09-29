@@ -6,6 +6,7 @@ mod postgres_destination;
 mod sync_config;
 
 pub use data_record::DataRecord;
-pub use models_info::{DataModel};
+pub use models_info::DataModel;
 pub use nats_receive::{NatMessageReceive, NatsReceive};
 pub use postgres_destination::PostgresDestination;
+pub use sync_config::{RowAction, SyncConfig};

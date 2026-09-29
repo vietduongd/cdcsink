@@ -1,9 +1,13 @@
-use std::{collections::HashMap, env, error::Error};
+use std::{
+    collections::{HashMap, HashSet},
+    env,
+    error::Error,
+};
 
 use chrono::Local;
 use dotenvy::dotenv;
 
-use crate::models::{NatMessageReceive, PostgresDestination};
+use crate::models::{NatMessageReceive, PostgresDestination, RowAction, SyncConfig};
 
 mod models;
 
@@ -26,6 +30,24 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let nats_consumer_name =
         env::var("NATS_CONSUMER_NAME").unwrap_or("cdcsink_consumer".to_string());
     let nats_stream_name = env::var("NATS_STREAM_NAME").expect("NATS_STREAM_NAME not set");
+
+    let sync_config = match SyncConfig::from_env_value(env::var("SYNC_CONFIG_PATH").ok()) {
+        Ok(Some(config)) => {
+            println!(
+                "Sync config loaded: tables [{}]",
+                config.table_names().join(", ")
+            );
+            Some(config)
+        }
+        Ok(None) => {
+            println!("SYNC_CONFIG_PATH not set: syncing ALL tables/columns/rows (no filter)");
+            None
+        }
+        Err(e) => {
+            eprintln!("{}", e);
+            std::process::exit(1);
+        }
+    };
 
     println!("Configuration loaded successfully");
     println!("NATS URL: {}", nats_url);
@@ -59,19 +81,28 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .get_schema_info(&pg_pool)
         .await
         .map_err(|e| Box::<dyn Error>::from(e))?;
+    let mut logged_type_errors: HashSet<String> = HashSet::new();
     loop {
-        let messages = nats_info.receive_messages(&mut consumer).await?;
+        let messages = nats_info
+            .receive_messages(&mut consumer, sync_config.as_ref(), &mut logged_type_errors)
+            .await?;
         if messages.is_empty() {
             continue;
         }
         println!("Received {} messages at {}", messages.len(), Local::now());
         let mut message_active: HashMap<String, Vec<&NatMessageReceive>> = HashMap::new();
         for msg in &messages {
-            let mut table_name_new = msg.table_name.clone();
-            if let Some(stripped) = table_name_new.strip_suffix("_resync") {
-                table_name_new = stripped.to_string();
+            let table_name = &msg.table_name;
+            if msg.action == RowAction::Delete {
+                // Delete không kích hoạt DDL; table chưa có ở đích thì không có gì để xóa
+                if schema_cache.contains_key(table_name) {
+                    message_active
+                        .entry(table_name.clone())
+                        .or_insert(Vec::new())
+                        .push(msg);
+                }
+                continue;
             }
-            let table_name = &table_name_new;
             if !schema_cache.contains_key(table_name) {
                 // Table chưa tồn tại: nếu message_active đang có dữ liệu thì insert trước
                 if let Some(buffered) = message_active.remove(table_name) {

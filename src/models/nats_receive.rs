@@ -11,7 +11,10 @@ use async_nats::{
 use async_nats::jetstream::consumer::PullConsumer;
 use futures_util::StreamExt;
 
-use crate::models::{DataModel, DataRecord};
+use crate::models::{
+    DataModel, DataRecord, RowAction, SyncConfig,
+    sync_config::classify,
+};
 
 pub struct NatsReceive {
     pub url: String,
@@ -27,6 +30,12 @@ pub struct NatMessageReceive {
     pub table_name: String,
     pub table_value: HashMap<String, DataModel>,
     pub primary_key: Option<String>,
+    pub action: RowAction,
+}
+
+/// Bỏ hậu tố `_resync` để message resync dùng chung table và config với table gốc.
+pub fn normalize_table_name(name: &str) -> String {
+    name.strip_suffix("_resync").unwrap_or(name).to_string()
 }
 
 impl NatsReceive {
@@ -78,8 +87,10 @@ impl NatsReceive {
     pub async fn receive_messages(
         &self,
         consumer: &mut PullConsumer,
+        sync_config: Option<&SyncConfig>,
+        logged_type_errors: &mut HashSet<String>,
     ) -> Result<Vec<NatMessageReceive>, String> {
-       let mut messages = consumer
+        let mut messages = consumer
             .fetch()
             .max_messages(self.number_pull_object)
             .expires(Duration::from_secs(5)) // 👈 MaxWait
@@ -88,16 +99,20 @@ impl NatsReceive {
             .map_err(|e| format!("Failed to receive messages: {}", e))?;
 
         let mut received_messages: Vec<NatMessageReceive> = Vec::new();
+        // table -> (tổng số message, số message bị loại vì lỗi kiểu)
+        let mut type_rejections: HashMap<String, (usize, usize)> = HashMap::new();
         let mut counter = 0;
         while let Some(Ok(message)) = messages.next().await {
             let data_record: DataRecord = serde_json::from_slice(&message.payload)
                 .map_err(|e| format!("Failed to deserialize message payload: {}", e))?;
-            
-            let table_name = data_record
-                .get_table_name()
-                .ok_or("Failed to get table name from data record")?;
 
-            let table_value = data_record
+            let table_name = normalize_table_name(
+                &data_record
+                    .get_table_name()
+                    .ok_or("Failed to get table name from data record")?,
+            );
+
+            let mut table_value = data_record
                 .get_table_structure()
                 .ok_or("Failed to get table structure from data record")?;
 
@@ -106,14 +121,46 @@ impl NatsReceive {
                 None => continue,
             };
 
+            let table_config = sync_config.and_then(|config| config.table(&table_name));
+            let (action, outcome) = classify(&table_value, table_config);
+
+            for error in &outcome.type_errors {
+                let key = format!("{}|{}|{:?}", table_name, error.column, error.op);
+                if logged_type_errors.insert(key) {
+                    eprintln!(
+                        "Sync filter type mismatch: table {} column {} op {:?}: {}",
+                        table_name, error.column, error.op, error.detail
+                    );
+                }
+            }
+            let stats = type_rejections.entry(table_name.clone()).or_insert((0, 0));
+            stats.0 += 1;
+            if !outcome.matched && !outcome.type_errors.is_empty() {
+                stats.1 += 1;
+            }
+
+            if let Some(config) = table_config {
+                config.retain_columns(&mut table_value);
+            }
+
             received_messages.push(NatMessageReceive {
                 message,
                 table_name,
                 table_value,
                 index: counter,
-                primary_key: primary_key,
+                primary_key,
+                action,
             });
             counter += 1;
+        }
+
+        for (table_name, (total, rejected)) in &type_rejections {
+            if *total > 0 && total == rejected {
+                eprintln!(
+                    "WARNING: all {} rows of table {} rejected due to type mismatch in where",
+                    total, table_name
+                );
+            }
         }
 
         Ok(received_messages)
@@ -128,5 +175,19 @@ impl NatsReceive {
                 .map_err(|e| format!("Failed to acknowledge message: {}", e))?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Review Focus #5: table _resync dùng chung config/tên với table gốc
+    #[test]
+    fn strips_resync_suffix() {
+        assert_eq!(normalize_table_name("orders_resync"), "orders");
+        assert_eq!(normalize_table_name("OrderItems_resync"), "OrderItems");
+        assert_eq!(normalize_table_name("orders"), "orders");
+        assert_eq!(normalize_table_name("resync_log"), "resync_log");
     }
 }
