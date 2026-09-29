@@ -753,6 +753,15 @@ tables:
     }
 
     #[test]
+    fn example_config_file_is_valid() {
+        let cfg = SyncConfig::load(concat!(env!("CARGO_MANIFEST_DIR"), "/sync_config.example.yaml"))
+            .expect("example config must be valid");
+        assert!(cfg.table("orders").is_some());
+        assert!(cfg.table("OrderItems").is_some());
+        assert!(cfg.table("UserAccounts").is_some());
+    }
+
+    #[test]
     fn load_reports_missing_file() {
         let err = SyncConfig::load("does/not/exist.yaml").expect_err("missing file");
         assert!(err.contains("Cannot read sync config does/not/exist.yaml"), "{err}");

@@ -1,0 +1,36 @@
+# Cấu hình cột và bộ lọc dòng theo từng table.
+# Đường dẫn file đặt qua env SYNC_CONFIG_PATH. File chỉ được nạp khi khởi động.
+#
+# - Table không khai báo ở đây: sync toàn bộ cột, toàn bộ dòng.
+# - Key là tên table như payload.source.table, không kèm schema, không kèm "_resync".
+#   Khớp chính xác trước, sau đó không phân biệt hoa thường. "order_items" KHÔNG khớp "OrderItems".
+# - include / exclude: chọn cột (không dùng cả hai). Cột "id" luôn được giữ.
+# - where: danh sách điều kiện, tất cả phải đúng (AND).
+#   op: eq, ne, gt, gte, lt, lte, in, not_in, is_null, not_null
+#   Giá trị so chính xác (phân biệt hoa thường). Số viết không có dấu nháy: value: 5, không phải "5".
+# - Dòng không khớp where sẽ bị XÓA khỏi DB đích (nếu có).
+#
+# CẢNH BÁO: cột đã có ở DB đích mà sau đó bị loại khỏi config sẽ không bị drop, chỉ ngừng cập nhật.
+# Nếu cột đó là NOT NULL, insert dòng mới sẽ lỗi — hãy DROP hoặc bỏ NOT NULL cột đó bằng tay.
+
+tables:
+  # Tên snake_case
+  orders:
+    include: [id, customer_id, total, status, created_at]
+    where:
+      - { column: tenant_id, op: eq, value: 5 }        # tenant_id không sync nhưng vẫn dùng để lọc được
+      - { column: status, op: in, value: [paid, shipped] }
+      - { column: deleted_at, op: is_null }
+
+  users:
+    exclude: [password_hash, secret_token]
+
+  # Tên CamelCase: viết đúng như ở nguồn
+  OrderItems:
+    include: [id, OrderId, ProductId, Quantity, UnitPrice]
+    where:
+      - { column: TenantId, op: eq, value: 5 }
+      - { column: Status, op: in, value: [Paid, Shipped] }
+
+  UserAccounts:
+    exclude: [PasswordHash, SecurityStamp]
