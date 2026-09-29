@@ -3,6 +3,7 @@ mod decimal;
 mod models_info;
 mod nats_receive;
 mod postgres_destination;
+mod sync_config;
 
 pub use data_record::DataRecord;
 pub use models_info::{DataModel};
