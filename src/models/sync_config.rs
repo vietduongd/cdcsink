@@ -1,7 +1,11 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use serde::Deserialize;
 use serde_json::Value;
+
+use crate::models::DataModel;
+
+pub const ID_COLUMN: &str = "id";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Op {
@@ -196,6 +200,31 @@ fn is_scalar(v: &Value) -> bool {
     matches!(v, Value::Number(_) | Value::String(_) | Value::Bool(_))
 }
 
+impl TableConfig {
+    /// Giữ lại các cột theo include/exclude. Cột `id` luôn được giữ.
+    pub fn retain_columns(&self, row: &mut HashMap<String, DataModel>) {
+        let names = match &self.columns {
+            ColumnSelection::All => return,
+            ColumnSelection::Include(names) | ColumnSelection::Exclude(names) => names,
+        };
+        let selected: HashSet<String> = names
+            .iter()
+            .filter_map(|name| resolve_key(row, name).cloned())
+            .collect();
+        let keep_selected = matches!(self.columns, ColumnSelection::Include(_));
+        row.retain(|key, _| key == ID_COLUMN || selected.contains(key) == keep_selected);
+    }
+}
+
+/// Tìm key trong map khớp `name`: chính xác trước, sau đó không phân biệt hoa thường.
+fn resolve_key<'a, V>(map: &'a HashMap<String, V>, name: &str) -> Option<&'a String> {
+    if let Some((key, _)) = map.get_key_value(name) {
+        return Some(key);
+    }
+    let lower = name.to_lowercase();
+    map.keys().find(|key| key.to_lowercase() == lower)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -324,6 +353,70 @@ tables:
     fn rejects_empty_file() {
         let err = config_error("   \n");
         assert!(err.contains("file is empty"), "{err}");
+    }
+
+    fn row(pairs: &[(&str, Value)]) -> HashMap<String, DataModel> {
+        pairs
+            .iter()
+            .map(|(k, v)| {
+                (
+                    k.to_string(),
+                    DataModel {
+                        value: v.clone(),
+                        data_type: "TEXT".to_string(),
+                        nullable: true,
+                        simple_type: "TEXT".to_string(),
+                    },
+                )
+            })
+            .collect()
+    }
+
+    fn sorted_keys(row: &HashMap<String, DataModel>) -> Vec<String> {
+        let mut keys: Vec<String> = row.keys().cloned().collect();
+        keys.sort();
+        keys
+    }
+
+    // Review Focus #5: include không có id thì id vẫn được giữ
+    #[test]
+    fn include_keeps_listed_columns_and_always_id() {
+        let cfg = config("tables:\n  orders:\n    include: [total, status]\n");
+        let mut r = row(&[("id", json!(1)), ("total", json!(10)), ("status", json!("paid")), ("secret", json!("x"))]);
+        cfg.table("orders").unwrap().retain_columns(&mut r);
+        assert_eq!(sorted_keys(&r), vec!["id", "status", "total"]);
+    }
+
+    #[test]
+    fn exclude_drops_listed_columns_but_never_id() {
+        let cfg = config("tables:\n  users:\n    exclude: [password_hash, id]\n");
+        let mut r = row(&[("id", json!(1)), ("name", json!("a")), ("password_hash", json!("h"))]);
+        cfg.table("users").unwrap().retain_columns(&mut r);
+        assert_eq!(sorted_keys(&r), vec!["id", "name"]);
+    }
+
+    #[test]
+    fn column_names_match_case_insensitively() {
+        let cfg = config("tables:\n  UserAccounts:\n    exclude: [passwordhash]\n");
+        let mut r = row(&[("id", json!(1)), ("UserName", json!("a")), ("PasswordHash", json!("h"))]);
+        cfg.table("UserAccounts").unwrap().retain_columns(&mut r);
+        assert_eq!(sorted_keys(&r), vec!["UserName", "id"]);
+    }
+
+    #[test]
+    fn exact_column_match_wins_over_case_insensitive() {
+        let cfg = config("tables:\n  t:\n    include: [Status]\n");
+        let mut r = row(&[("id", json!(1)), ("Status", json!("a")), ("status", json!("b"))]);
+        cfg.table("t").unwrap().retain_columns(&mut r);
+        assert_eq!(sorted_keys(&r), vec!["Status", "id"]);
+    }
+
+    #[test]
+    fn all_selection_keeps_everything() {
+        let cfg = config("tables:\n  logs:\n");
+        let mut r = row(&[("id", json!(1)), ("msg", json!("x"))]);
+        cfg.table("logs").unwrap().retain_columns(&mut r);
+        assert_eq!(sorted_keys(&r), vec!["id", "msg"]);
     }
 
     #[test]
