@@ -1,0 +1,37 @@
+# Config dùng chung cho mọi suite trong test/e2e/suites (tên table không trùng giữa các suite).
+
+tables:
+  # ---- 01-basic ----
+  orders:
+    include: [id, customer_id, total, status, created_at]
+    where:
+      - { column: tenant_id, op: eq, value: 5 }
+      - { column: status, op: in, value: [paid, shipped] }
+      - { column: deleted_at, op: is_null }
+
+  users:
+    exclude: [password_hash, secret_token]
+
+  OrderItems:
+    include: [id, OrderId, ProductId, Quantity, UnitPrice]
+    where:
+      - { column: TenantId, op: eq, value: 5 }
+      - { column: Status, op: in, value: [Paid, Shipped] }
+
+  UserAccounts:
+    exclude: [PasswordHash, SecurityStamp]
+
+  # ---- 03-camelcase ----
+  # Cột camelCase; include cố ý viết sai hoa thường (TotalAmount, orderstatus) để test khớp không phân biệt hoa thường
+  SalesOrders:
+    include: [id, orderNo, customerId, TotalAmount, orderstatus, isActive, createdAt]
+    where:
+      - { column: tenantId, op: eq, value: 5 }
+      - { column: orderStatus, op: in, value: [Paid, Shipped] }
+      - { column: deletedAt, op: is_null }
+      - { column: totalAmount, op: gte, value: 100 }
+      - { column: isActive, op: eq, value: true }
+
+  # Key viết thường, table nguồn là "SalesOrderLines" -> khớp không phân biệt hoa thường
+  salesorderlines:
+    exclude: [internalNote, CostPrice]

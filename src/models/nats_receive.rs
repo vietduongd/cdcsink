@@ -11,7 +11,10 @@ use async_nats::{
 use async_nats::jetstream::consumer::PullConsumer;
 use futures_util::StreamExt;
 
-use crate::models::{DataModel, DataRecord, RowAction, SyncConfig, sync_config::classify};
+use crate::models::{
+    DataModel, DataRecord, RowAction, SyncConfig,
+    sync_config::{MatchOutcome, classify, primary_key_column},
+};
 
 pub struct NatsReceive {
     pub url: String,
@@ -113,13 +116,27 @@ impl NatsReceive {
                 .get_table_structure()
                 .ok_or("Failed to get table structure from data record")?;
 
-            let primary_key = match table_value.get("id") {
-                Some(op) => Some(op.value.to_string()),
-                None => continue,
+            let primary_key = match primary_key_column(&table_value) {
+                Some(column) => Some(table_value[column].value.to_string()),
+                None => {
+                    let key = format!("{}|no-primary-key", table_name);
+                    if logged_type_errors.insert(key) {
+                        eprintln!(
+                            "Table {} has no \"id\" column: messages are skipped",
+                            table_name
+                        );
+                    }
+                    continue;
+                }
             };
 
             let table_config = sync_config.and_then(|config| config.table(&table_name));
-            let (action, outcome) = classify(&table_value, table_config);
+            // Debezium xóa dòng bằng op "d"; "before" có thể chỉ chứa khóa chính nên không xét where
+            let (action, outcome) = if data_record.payload.op == "d" {
+                (RowAction::Delete, MatchOutcome::default())
+            } else {
+                classify(&table_value, table_config)
+            };
 
             for error in &outcome.type_errors {
                 let key = format!("{}|{}|{:?}", table_name, error.column, error.op);

@@ -1,0 +1,2 @@
+Debezium (decimal.handling.mode=precise) không biểu diễn được numeric 'NaN' nên gửi NULL.
+Cách xử lý: decimal.handling.mode=string nếu cần giữ NaN (cột đích khi đó là TEXT).

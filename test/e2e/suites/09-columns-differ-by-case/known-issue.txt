@@ -1,0 +1,2 @@
+Debezium từ chối table có hai cột chỉ khác hoa thường (code / "Code") và dừng connector.
+Cách xử lý: đổi tên một cột ở nguồn.

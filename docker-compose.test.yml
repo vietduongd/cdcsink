@@ -1,0 +1,122 @@
+# Môi trường test end-to-end thực tế:
+#   pg-source (Postgres, wal_level=logical)
+#     -> debezium (Debezium Server, đọc WAL qua pgoutput)
+#     -> nats (JetStream, stream CDC, subject debezium.<schema>.<table>)
+#     -> cdcsink (build từ Dockerfile, lọc theo test/e2e/sync_config.yaml)
+#     -> pg-sink (Postgres đích, DB receive_sync)
+#
+# Chạy bộ test tự động (mỗi suite một stack sạch, so sánh từng ô nguồn/đích):
+#   bash test/e2e/run.sh                     # tất cả suite trong test/e2e/suites
+#   KEEP=1 bash test/e2e/run.sh 03-camelcase # một suite, giữ stack lại để tự xem
+# Xem DB khi stack đang chạy:
+#   docker compose -f docker-compose.test.yml exec pg-source psql -U postgres -d source_db
+#   docker compose -f docker-compose.test.yml exec pg-sink   psql -U postgres -d receive_sync
+# Dọn sạch:
+#   docker compose -f docker-compose.test.yml down -v
+
+name: cdcsink-e2e
+
+services:
+  pg-source:
+    image: postgres:16
+    command: ["postgres", "-c", "wal_level=logical", "-c", "max_replication_slots=4", "-c", "max_wal_senders=4"]
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: source_db
+    ports:
+      - "5433:5432"
+    volumes:
+      - pg-source-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d source_db"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  pg-sink:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: receive_sync
+    ports:
+      - "5434:5432"
+    volumes:
+      - pg-sink-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d receive_sync"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  nats:
+    image: nats:2.10-alpine
+    command: ["-js", "-sd", "/data", "-m", "8222"]
+    ports:
+      - "14222:4222"
+      - "18222:8222"
+    volumes:
+      - nats-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- 'http://localhost:8222/healthz?js-enabled-only=true' || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  # Tạo sẵn stream CDC với subject debezium.> trước khi Debezium publish và cdcsink subscribe.
+  # (cdcsink gọi get_or_create_stream với config mặc định -> nếu tự tạo sẽ không có subject debezium.>)
+  nats-init:
+    image: natsio/nats-box:latest
+    depends_on:
+      nats:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >
+        nats --server nats://nats:4222 stream info CDC >/dev/null 2>&1 ||
+        nats --server nats://nats:4222 stream add CDC
+        --subjects 'debezium.>' --storage file --retention limits
+        --discard old --replicas 1 --max-age 7d --defaults
+    restart: "no"
+
+  debezium:
+    image: quay.io/debezium/server:3.7
+    depends_on:
+      pg-source:
+        condition: service_healthy
+      nats-init:
+        condition: service_completed_successfully
+    volumes:
+      - ./test/e2e/debezium/application.properties:/debezium/config/application.properties:ro
+      - debezium-data:/debezium/data
+    restart: on-failure
+
+  cdcsink:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: cdcsink:e2e
+    depends_on:
+      pg-sink:
+        condition: service_healthy
+      nats-init:
+        condition: service_completed_successfully
+    environment:
+      NATS_URL: nats://nats:4222
+      NATS_STREAM_NAME: CDC
+      NATS_CONSUMER_NAME: cdcsink_e2e
+      NATS_PULL_NUMBER_OBJECT: "1000"
+      TOPIC_NAME: debezium.>
+      DATABASE_URL: postgres://postgres:postgres@pg-sink:5432/receive_sync
+      DATABASE_SCHEMA_EXPECT: public
+      SYNC_CONFIG_PATH: /app/sync_config.yaml
+    volumes:
+      - ./test/e2e/sync_config.yaml:/app/sync_config.yaml:ro
+    restart: on-failure
+
+volumes:
+  pg-source-data:
+  pg-sink-data:
+  nats-data:
+  debezium-data:

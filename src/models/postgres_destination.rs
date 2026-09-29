@@ -1,13 +1,12 @@
 use std::collections::{HashMap, HashSet};
 
-use chrono::{DateTime, Datelike, Timelike};
+use base64::{Engine, engine::general_purpose};
 use serde_json::Value;
-use sqlx::{PgPool, Row, postgres::PgPoolOptions, types::Json};
-use uuid::Uuid;
+use sqlx::{PgPool, Row, postgres::PgPoolOptions};
 
 use crate::models::{
-    DataModel, NatMessageReceive, RowAction, decimal::decode_base64_decimal,
-    models_info::DecimalModel,
+    DataModel, NatMessageReceive, RowAction, decimal::decimal_text,
+    sync_config::primary_key_column,
 };
 
 pub struct PostgresDestination {
@@ -92,6 +91,7 @@ impl PostgresDestination {
         columns: &HashMap<String, DataModel>,
         pool: &PgPool,
     ) {
+        let primary_key = primary_key_column(columns);
         let mut columns_definitions = Vec::new();
         for (col_name, col_type) in columns {
             let col_def = format!(
@@ -99,7 +99,7 @@ impl PostgresDestination {
                 Self::quote_identifier(col_name),
                 col_type.data_type,
                 if col_type.nullable { "" } else { "NOT NULL" },
-                if col_name.clone() == "id".to_string() {
+                if Some(col_name) == primary_key {
                     "PRIMARY KEY"
                 } else {
                     ""
@@ -230,359 +230,213 @@ impl PostgresDestination {
                 .into_iter()
                 .partition(|msg| msg.action == RowAction::Delete);
 
-        // Xử lý delete
+        let table = format!(
+            "{}.{}",
+            Self::quote_identifier(&self.schema_expect),
+            Self::quote_identifier(table_name)
+        );
+
         if !to_delete.is_empty() {
-            let id_data = to_delete[0]
-                .table_value
-                .get("id")
-                .expect("Missing id column for delete");
-            let simple_type = &id_data.simple_type;
-
-            let delete_query_str = format!(
-                "DELETE FROM {}.{} WHERE \"id\" = ANY($1::{}[]);",
-                Self::quote_identifier(&self.schema_expect),
-                Self::quote_identifier(table_name),
-                simple_type
-            );
-
-            let ids: Vec<Value> = to_delete
-                .iter()
-                .map(|m| m.table_value.get("id").unwrap().value.clone())
-                .collect();
-
-            let mut q = sqlx::query(&delete_query_str);
-
-            match simple_type.as_str() {
-                "TEXT" => {
-                    let vals: Vec<Option<String>> = ids
-                        .iter()
-                        .map(|v| v.as_str().map(|s| s.to_string()))
-                        .collect();
-                    q = q.bind(vals);
-                }
-                "INTEGER" => {
-                    let vals: Vec<Option<i32>> =
-                        ids.iter().map(|v| v.as_i64().map(|i| i as i32)).collect();
-                    q = q.bind(vals);
-                }
-                "BIGINT" => {
-                    let vals: Vec<Option<i64>> = ids.iter().map(|v| v.as_i64()).collect();
-                    q = q.bind(vals);
-                }
-                "UUID" => {
-                    let vals: Vec<Option<Uuid>> = ids
-                        .iter()
-                        .map(|v| v.as_str().and_then(|s| Uuid::parse_str(s).ok()))
-                        .collect();
-                    q = q.bind(vals);
-                }
-                _ => {
-                    let vals: Vec<Option<String>> = ids.iter().map(|v| Some(v.to_string())).collect();
-                    q = q.bind(vals);
-                }
-            }
-            if let Err(e) = q.execute(pool).await {
-                eprintln!("Failed to execute delete for table {}: {}", table_name, e);
-            }
+            Self::delete_rows(&table, table_name, &to_delete, pool).await;
         }
-
         if to_upsert.is_empty() {
             return;
         }
 
-        let column_active = to_upsert[0];
-        let max_records = column_active.table_value.len();
-        let mut s = String::from("INSERT INTO ");
-        s.push_str(
-            format!(
-                "{}.{} (",
-                Self::quote_identifier(&self.schema_expect),
-                Self::quote_identifier(table_name)
-            )
-            .as_str(),
+        let column_active = &to_upsert[0].table_value;
+        let primary_key = match primary_key_column(column_active) {
+            Some(pk) => pk.clone(),
+            None => {
+                eprintln!("Missing id column for upsert into table {}", table_name);
+                return;
+            }
+        };
+        let mut colum_keys = column_active.keys().cloned().collect::<Vec<String>>();
+        colum_keys.sort();
+
+        // Mọi cột bind dạng TEXT[] rồi cast sang kiểu cột trong SELECT: một đường xử lý cho mọi kiểu
+        // (NaN/Infinity, infinity, mảng, bytea, numeric không giới hạn chữ số...)
+        let column_list = colum_keys
+            .iter()
+            .map(|column| Self::quote_identifier(column))
+            .collect::<Vec<String>>()
+            .join(", ");
+        let select_list = colum_keys
+            .iter()
+            .enumerate()
+            .map(|(i, column)| format!("u.c{}::{}", i, column_active[column].data_type))
+            .collect::<Vec<String>>()
+            .join(", ");
+        let params = (1..=colum_keys.len())
+            .map(|i| format!("${}::TEXT[]", i))
+            .collect::<Vec<String>>()
+            .join(", ");
+        let aliases = (0..colum_keys.len())
+            .map(|i| format!("c{}", i))
+            .collect::<Vec<String>>()
+            .join(", ");
+        let updates = colum_keys
+            .iter()
+            .filter(|column| **column != primary_key)
+            .map(|column| {
+                let quoted = Self::quote_identifier(column);
+                format!("{} = EXCLUDED.{}", quoted, quoted)
+            })
+            .collect::<Vec<String>>();
+        let on_conflict = if updates.is_empty() {
+            "DO NOTHING".to_string()
+        } else {
+            format!("DO UPDATE SET {}", updates.join(", "))
+        };
+        let s = format!(
+            "INSERT INTO {} ({}) SELECT {} FROM unnest({}) AS u({}) ON CONFLICT ({}) {}",
+            table,
+            column_list,
+            select_list,
+            params,
+            aliases,
+            Self::quote_identifier(&primary_key),
+            on_conflict
         );
 
-        let mut colum_keys = column_active
-            .table_value
-            .keys()
-            .cloned()
-            .collect::<Vec<String>>();
-        colum_keys.sort();
-        for (i, column) in colum_keys.clone().iter().enumerate() {
-            s.push_str(
-                format!(
-                    "{}{} ",
-                    Self::quote_identifier(column),
-                    if i < max_records.clone() - 1 { "," } else { "" }
-                )
-                .as_str(),
-            );
-        }
-        s.push_str(" )  SELECT * FROM unnest( ");
-        for (i, v) in colum_keys.clone().iter().enumerate() {
-            let data_model = column_active.table_value.get(v).unwrap();
-
-            // Check if timestamp type needs TEXT[] cast for infinity values
-            let needs_text_cast = if data_model.simple_type == "TIMESTAMPTZ"
-                || data_model.simple_type == "TIMESTAMP"
-            {
-                to_upsert.iter().any(|col_info| {
-                    if let Some(data) = col_info.table_value.get(v) {
-                        let val_str = data.value.as_str().unwrap_or("");
-                        val_str == "-infinity" || val_str == "infinity"
-                    } else {
-                        false
-                    }
-                })
-            } else {
-                false
-            };
-
-            let type_cast =
-                if data_model.simple_type == "NUMERIC" || data_model.simple_type == "DECIMAL" {
-                    // Cast from TEXT[] to NUMERIC[] for proper handling
-                    format!("${}::TEXT[]::{}[]", i + 1, data_model.simple_type)
-                } else if needs_text_cast {
-                    // Cast from TEXT[] to TIMESTAMP[] for infinity values
-                    format!("${}::TEXT[]::{}[]", i + 1, data_model.simple_type)
-                } else {
-                    format!("${}::{}[]", i + 1, data_model.simple_type)
-                };
-            s.push_str(
-                format!(
-                    "{} {} ",
-                    type_cast,
-                    if i < max_records.clone() - 1 { "," } else { "" }
-                )
-                .as_str(),
-            );
-        }
-        s.push_str(") ON CONFLICT (\"id\") DO UPDATE SET ");
-        for (i, column) in colum_keys.clone().iter().enumerate() {
-            if column == "id" {
-                continue;
-            }
-            s.push_str(
-                format!(
-                    "{} = EXCLUDED.{} {}",
-                    Self::quote_identifier(column),
-                    Self::quote_identifier(column),
-                    if i < max_records.clone() - 1 { "," } else { "" }
-                )
-                .as_str(),
-            );
-        }
-        if s.ends_with(",") {
-            s.pop(); // Remove trailing comma
-        }
-        // Build typed value vectors based on simple_type
         let mut query = sqlx::query(&s);
-
-        for column in colum_keys.clone() {
-            let data_model = column_active.table_value.get(&column).unwrap();
-            let simple_type = &data_model.simple_type;
-
-            // Collect values from all records for this column
-            // Use NULL if column doesn't exist in a particular record
-            let values: Vec<Value> = to_upsert
+        for column in &colum_keys {
+            // Record thiếu cột này thì dùng NULL
+            let values: Vec<Option<String>> = to_upsert
                 .iter()
-                .map(|col_info| {
-                    col_info
-                        .table_value
-                        .get(&column)
-                        .map(|data| data.value.clone())
-                        .unwrap_or(Value::Null)
-                })
+                .map(|col_info| col_info.table_value.get(column).and_then(Self::to_pg_text))
                 .collect();
-            // Bind based on the PostgreSQL type
-            match simple_type.as_str() {
-                "TEXT" => {
-                    let text_values: Vec<Option<String>> = values
-                        .iter()
-                        .map(|v| {
-                            if v.is_null() {
-                                None
-                            } else {
-                                v.as_str().map(|s| s.to_string())
-                            }
-                        })
-                        .collect();
-                    query = query.bind(text_values);
-                }
-                "INTEGER" => {
-                    let int_values: Vec<Option<i32>> = values
-                        .iter()
-                        .map(|v| {
-                            if v.is_null() {
-                                None
-                            } else {
-                                v.as_i64().map(|i| i as i32)
-                            }
-                        })
-                        .collect();
-                    query = query.bind(int_values);
-                }
-                "SMALLINT" => {
-                    let int_values: Vec<Option<i16>> = values
-                        .iter()
-                        .map(|v| {
-                            if v.is_null() {
-                                None
-                            } else {
-                                v.as_i64().map(|i| i as i16)
-                            }
-                        })
-                        .collect();
-                    query = query.bind(int_values);
-                }
-                "BIGINT" => {
-                    let bigint_values: Vec<Option<i64>> = values
-                        .iter()
-                        .map(|v| if v.is_null() { None } else { v.as_i64() })
-                        .collect();
-                    query = query.bind(bigint_values);
-                }
-                "DOUBLE PRECISION" | "REAL" => {
-                    let float_values: Vec<Option<f64>> = values
-                        .iter()
-                        .map(|v| if v.is_null() { None } else { v.as_f64() })
-                        .collect();
-                    query = query.bind(float_values);
-                }
-                "BOOLEAN" => {
-                    let bool_values: Vec<Option<bool>> = values
-                        .iter()
-                        .map(|v| if v.is_null() { None } else { v.as_bool() })
-                        .collect();
-                    query = query.bind(bool_values);
-                }
-                "NUMERIC" | "DECIMAL" => {
-                    let numeric_values: Vec<Option<String>> = values
-                        .iter()
-                        .map(|v| {
-                            if v.is_null() {
-                                return None;
-                            }
-                            if let Ok(decimal_model) =
-                                serde_json::from_value::<DecimalModel>(v.clone())
-                            {
-                                if let Some(f64_value) = decode_base64_decimal(
-                                    &decimal_model.value,
-                                    decimal_model.scale,
-                                ) {
-                                    return Some(f64_value.to_string());
-                                }
-                            }
-                            if let Some(num) = v.as_f64() {
-                                Some(num.to_string())
-                            } else if let Some(num) = v.as_i64() {
-                                Some(num.to_string())
-                            } else {
-                                v.as_str().map(|s| s.to_string())
-                            }
-                        })
-                        .collect();
-                    query = query.bind(numeric_values);
-                }
-                "TIMESTAMPTZ" | "TIMESTAMP" => {
-                    let timestamp_values: Vec<Option<String>> = values
-                        .iter()
-                        .map(|v| {
-                            if v.is_null() {
-                                return None;
-                            }
-
-                            let str_value = v.as_str().unwrap_or("");
-
-                            // Keep infinity values as-is
-                            if str_value == "-infinity" || str_value == "infinity" {
-                                return Some(str_value.to_string());
-                            }
-
-                            // Try to parse the timestamp and check year
-                            if let Ok(dt) = DateTime::parse_from_rfc3339(str_value) {
-                                let year = dt.year();
-                                let month = dt.month();
-                                let day = dt.day();
-                                let hour = dt.hour();
-                                let minute = dt.minute();
-                                let second = dt.second();
-
-                                if year < 1900 {
-                                    // Set to 1900-01-01 00:00:00 UTC
-                                    return Some(format!(
-                                        "1900-{}-{}T{}:{}:{}",
-                                        month, day, hour, minute, second
-                                    ));
-                                }
-                                return Some(dt.to_rfc3339());
-                            }
-
-                            // If parsing fails, return as-is
-                            Some(str_value.to_string())
-                        })
-                        .collect();
-                    query = query.bind(timestamp_values);
-                }
-                "UUID" => {
-                    let uuid_values: Vec<Option<Uuid>> = values
-                        .iter()
-                        .map(|v| {
-                            if v.is_null() {
-                                None
-                            } else {
-                                v.as_str().and_then(|s| Uuid::parse_str(s).ok())
-                            }
-                        })
-                        .collect();
-                    query = query.bind(uuid_values);
-                }
-                "JSONB" | "JSON" => {
-                    let jsonb_values: Vec<Option<Json<Value>>> = values
-                        .iter()
-                        .map(|v| {
-                            if v.is_null() {
-                                None
-                            } else {
-                                // If the value is already a JSON object/array, use it directly
-                                // If it's a string, try to parse it
-                                let parsed = if v.is_string() {
-                                    let s = v.as_str().unwrap();
-                                    serde_json::from_str(s).unwrap_or_else(|_| v.clone())
-                                } else {
-                                    v.clone()
-                                };
-                                Some(Json(parsed))
-                            }
-                        })
-                        .collect();
-                    query = query.bind(jsonb_values);
-                }
-                _ => {
-                    // Default to TEXT for unknown types
-                    let text_values: Vec<Option<String>> = values
-                        .iter()
-                        .map(|v| {
-                            if v.is_null() {
-                                None
-                            } else {
-                                Some(v.to_string())
-                            }
-                        })
-                        .collect();
-                    query = query.bind(text_values);
-                }
-            }
+            query = query.bind(values);
         }
         query.execute(pool).await.expect("Failed to insert values");
     }
 
-    fn quote_identifier(identifier: &str) -> String {
-        // Check if identifier contains uppercase letters
-        if identifier.chars().any(|c| c.is_uppercase()) {
-            format!("\"{}\"", identifier)
-        } else {
-            identifier.to_string()
+    async fn delete_rows(
+        table: &str,
+        table_name: &str,
+        to_delete: &[&NatMessageReceive],
+        pool: &PgPool,
+    ) {
+        let primary_key = match primary_key_column(&to_delete[0].table_value) {
+            Some(pk) => pk.clone(),
+            None => {
+                eprintln!("Missing id column for delete in table {}", table_name);
+                return;
+            }
+        };
+        let key_type = &to_delete[0].table_value[&primary_key].data_type;
+        let delete_query_str = format!(
+            "DELETE FROM {} WHERE {} = ANY($1::TEXT[]::{}[]);",
+            table,
+            Self::quote_identifier(&primary_key),
+            key_type
+        );
+        let ids: Vec<Option<String>> = to_delete
+            .iter()
+            .map(|m| m.table_value.get(&primary_key).and_then(Self::to_pg_text))
+            .collect();
+        if let Err(e) = sqlx::query(&delete_query_str).bind(ids).execute(pool).await {
+            eprintln!("Failed to execute delete for table {}: {}", table_name, e);
         }
+    }
+
+    /// Dạng text Postgres đọc được của một ô, sẽ được cast sang kiểu cột khi insert. NULL -> None.
+    fn to_pg_text(data: &DataModel) -> Option<String> {
+        let value = &data.value;
+        if value.is_null() {
+            return None;
+        }
+        match data.simple_type.as_str() {
+            "NUMERIC" | "DECIMAL" => decimal_text(value),
+            "BYTEA" => {
+                let bytes = general_purpose::STANDARD.decode(value.as_str()?).ok()?;
+                let hex: String = bytes.iter().map(|b| format!("{:02x}", b)).collect();
+                Some(format!("\\x{}", hex))
+            }
+            "JSONB" | "JSON" => Some(match value {
+                // Debezium gửi JSON dạng chuỗi; chuỗi không phải JSON hợp lệ thì lưu thành JSON string
+                Value::String(s) if serde_json::from_str::<Value>(s).is_ok() => s.clone(),
+                other => other.to_string(),
+            }),
+            "ARRAY" => Some(Self::pg_array_literal(value)),
+            _ => Some(match value {
+                Value::String(s) => s.clone(),
+                other => other.to_string(),
+            }),
+        }
+    }
+
+    /// JSON array -> literal mảng Postgres, vd `{"a","b\"c",NULL}`.
+    fn pg_array_literal(value: &Value) -> String {
+        match value {
+            Value::Array(elements) => {
+                let items = elements
+                    .iter()
+                    .map(|element| match element {
+                        Value::Null => "NULL".to_string(),
+                        Value::Array(_) => Self::pg_array_literal(element),
+                        Value::String(s) => Self::quote_array_element(s),
+                        other => Self::quote_array_element(&other.to_string()),
+                    })
+                    .collect::<Vec<String>>();
+                format!("{{{}}}", items.join(","))
+            }
+            other => other.to_string(),
+        }
+    }
+
+    fn quote_array_element(s: &str) -> String {
+        format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
+    }
+
+    /// Luôn đặt trong dấu nháy kép: giữ hoa thường, cho phép từ khóa SQL, khoảng trắng, gạch ngang...
+    /// Tên viết thường khi quote vẫn trùng tên cũ nên không ảnh hưởng table đã tạo trước đây.
+    fn quote_identifier(identifier: &str) -> String {
+        format!("\"{}\"", identifier.replace('"', "\"\""))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn model(simple_type: &str, value: Value) -> DataModel {
+        DataModel {
+            value,
+            data_type: simple_type.to_string(),
+            nullable: true,
+            simple_type: simple_type.to_string(),
+        }
+    }
+
+    #[test]
+    fn quotes_every_identifier() {
+        assert_eq!(PostgresDestination::quote_identifier("order"), "\"order\"");
+        assert_eq!(PostgresDestination::quote_identifier("customer list"), "\"customer list\"");
+        assert_eq!(PostgresDestination::quote_identifier("OrderItems"), "\"OrderItems\"");
+        assert_eq!(PostgresDestination::quote_identifier("a\"b"), "\"a\"\"b\"");
+    }
+
+    #[test]
+    fn text_for_each_type() {
+        let text = |t: &str, v: Value| PostgresDestination::to_pg_text(&model(t, v));
+        assert_eq!(text("TEXT", Value::Null), None);
+        assert_eq!(text("TEXT", json!("it's \"x\"")).as_deref(), Some("it's \"x\""));
+        assert_eq!(text("DATE", json!("2024-02-29")).as_deref(), Some("2024-02-29"));
+        assert_eq!(text("DOUBLE PRECISION", json!(3.5)).as_deref(), Some("3.5"));
+        assert_eq!(text("DOUBLE PRECISION", json!("NaN")).as_deref(), Some("NaN"));
+        assert_eq!(text("BIGINT", json!(9223372036854775807i64)).as_deref(), Some("9223372036854775807"));
+        assert_eq!(text("BOOLEAN", json!(true)).as_deref(), Some("true"));
+        assert_eq!(text("NUMERIC", json!({"scale": 2, "value": "AeI="})).as_deref(), Some("4.82"));
+        assert_eq!(text("BYTEA", json!("AQL/")).as_deref(), Some("\\x0102ff"));
+        assert_eq!(text("JSONB", json!("{\"a\": 1}")).as_deref(), Some("{\"a\": 1}"));
+        assert_eq!(text("JSONB", json!("\"s\"")).as_deref(), Some("\"s\""));
+        assert_eq!(text("JSONB", json!("not json")).as_deref(), Some("\"not json\""));
+        assert_eq!(
+            text("ARRAY", json!(["a,b", "c\"d", "e\\f", null, ""])).as_deref(),
+            Some(r#"{"a,b","c\"d","e\\f",NULL,""}"#)
+        );
+        assert_eq!(text("ARRAY", json!([[1, 2], [3, 4]])).as_deref(), Some(r#"{{"1","2"},{"3","4"}}"#));
     }
 }

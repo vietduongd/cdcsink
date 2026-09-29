@@ -232,6 +232,16 @@ pub struct MatchOutcome {
     pub missing_columns: Vec<String>,
 }
 
+impl Default for MatchOutcome {
+    fn default() -> Self {
+        MatchOutcome {
+            matched: true,
+            type_errors: Vec::new(),
+            missing_columns: Vec::new(),
+        }
+    }
+}
+
 impl TableConfig {
     /// Giữ lại các cột theo include/exclude. Cột `id` luôn được giữ.
     pub fn retain_columns(&self, row: &mut HashMap<String, DataModel>) {
@@ -243,8 +253,11 @@ impl TableConfig {
             .iter()
             .filter_map(|name| resolve_key(row, name).cloned())
             .collect();
+        let primary_key = primary_key_column(row).cloned();
         let keep_selected = matches!(self.columns, ColumnSelection::Include(_));
-        row.retain(|key, _| key == ID_COLUMN || selected.contains(key) == keep_selected);
+        row.retain(|key, _| {
+            Some(key) == primary_key.as_ref() || selected.contains(key) == keep_selected
+        });
     }
 
     /// Xét toàn bộ điều kiện `where` (AND). Không short-circuit để thu đủ lỗi kiểu.
@@ -303,6 +316,11 @@ pub fn classify(
         RowAction::Upsert
     };
     (action, outcome)
+}
+
+/// Cột khóa chính: "id", không có thì cột tên "id" bất kể hoa thường (vd "Id" của EF Core).
+pub fn primary_key_column<V>(row: &HashMap<String, V>) -> Option<&String> {
+    resolve_key(row, ID_COLUMN)
 }
 
 /// Tìm key trong map khớp `name`: chính xác trước, sau đó không phân biệt hoa thường.
