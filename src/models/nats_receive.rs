@@ -13,6 +13,7 @@ use futures_util::StreamExt;
 
 use crate::models::{
     DataModel, DataRecord, RowAction, SyncConfig,
+    postgres_destination::SCHEMA_METADATA_TABLE,
     sync_config::{MatchOutcome, classify, primary_key_column},
 };
 
@@ -36,6 +37,13 @@ pub struct NatMessageReceive {
 /// Bỏ hậu tố `_resync` để message resync dùng chung table và config với table gốc.
 pub fn normalize_table_name(name: &str) -> String {
     name.strip_suffix("_resync").unwrap_or(name).to_string()
+}
+
+/// Table không bao giờ sync. `_cdc_schema_metadata` là metadata cdcsink tự tạo ở DB đích:
+/// khi DB đích lại là nguồn của một tầng CDC khác (cdcsink nối tiếp cdcsink),
+/// sync table này sẽ ghi đè metadata của tầng sau.
+pub fn is_ignored_table(name: &str) -> bool {
+    name.eq_ignore_ascii_case(SCHEMA_METADATA_TABLE)
 }
 
 impl NatsReceive {
@@ -111,6 +119,14 @@ impl NatsReceive {
                     .get_table_name()
                     .ok_or("Failed to get table name from data record")?,
             );
+            if is_ignored_table(&table_name) {
+                let key = format!("{}|ignored", table_name);
+                if logged_type_errors.insert(key) {
+                    eprintln!("Table {} is never synced: messages are skipped", table_name);
+                }
+                Self::ack_skipped(&message).await?;
+                continue;
+            }
 
             let mut table_value = data_record
                 .get_table_structure()
@@ -126,6 +142,7 @@ impl NatsReceive {
                             table_name
                         );
                     }
+                    Self::ack_skipped(&message).await?;
                     continue;
                 }
             };
@@ -191,6 +208,14 @@ impl NatsReceive {
         Ok(received_messages)
     }
 
+    /// Message bị bỏ qua vẫn phải ack, nếu không NATS gửi lại sau mỗi ack_wait mãi mãi.
+    async fn ack_skipped(message: &Message) -> Result<(), String> {
+        message
+            .ack()
+            .await
+            .map_err(|e| format!("Failed to acknowledge skipped message: {}", e))
+    }
+
     pub async fn ack_message(&self, nats_message: &Vec<NatMessageReceive>) -> Result<(), String> {
         for message in nats_message {
             message
@@ -214,5 +239,15 @@ mod tests {
         assert_eq!(normalize_table_name("OrderItems_resync"), "OrderItems");
         assert_eq!(normalize_table_name("orders"), "orders");
         assert_eq!(normalize_table_name("resync_log"), "resync_log");
+    }
+
+    #[test]
+    fn ignores_schema_metadata_table() {
+        assert!(is_ignored_table("_cdc_schema_metadata"));
+        assert!(is_ignored_table("_CDC_Schema_Metadata"));
+        // bản _resync được chuẩn hóa trước khi kiểm tra
+        assert!(is_ignored_table(&normalize_table_name("_cdc_schema_metadata_resync")));
+        assert!(!is_ignored_table("cdc_schema_metadata"));
+        assert!(!is_ignored_table("orders"));
     }
 }

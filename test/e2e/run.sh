@@ -94,6 +94,16 @@ run_suite() {
             | cut -c1-240 | sed 's/^/   | /'
     fi
 
+    # Mọi message phải được ack, kể cả message bị bỏ qua; còn ack pending nghĩa là NATS sẽ gửi lại mãi
+    local ack_pending
+    ack_pending=$(docker run --rm --network cdcsink-e2e_default natsio/nats-box:latest \
+        nats -s nats://nats:4222 consumer info CDC cdcsink_e2e -j 2>/dev/null \
+        | sed -n 's/.*"num_ack_pending": *\([0-9]*\).*/\1/p' | head -1)
+    if [[ -n "$ack_pending" && "$ack_pending" != "0" ]]; then
+        stalled=1
+        echo "   còn $ack_pending message chưa được ack"
+    fi
+
     echo " - so sánh nguồn và đích:"
     local out
     out=$( { echo "SET client_min_messages = warning;"; cat $E2E/lib/verify.sql

@@ -9,6 +9,9 @@ use crate::models::{
     sync_config::primary_key_column,
 };
 
+/// Table metadata cdcsink tự tạo ở DB đích.
+pub const SCHEMA_METADATA_TABLE: &str = "_cdc_schema_metadata";
+
 pub struct PostgresDestination {
     pub database_url: String,
     pub schema_expect: String,
@@ -34,7 +37,7 @@ impl PostgresDestination {
 
     pub async fn ensure_schema_metadata_table(&self, pool: &PgPool) -> Result<(), String> {
         let query = format!(
-            "CREATE TABLE IF NOT EXISTS {}.\"_cdc_schema_metadata\" (
+            "CREATE TABLE IF NOT EXISTS {}.{} (
                 schema_name TEXT NOT NULL,
                 table_name TEXT NOT NULL,
                 column_name TEXT NOT NULL,
@@ -43,7 +46,8 @@ impl PostgresDestination {
                 last_updated TIMESTAMP NOT NULL DEFAULT NOW(),
                 PRIMARY KEY (schema_name, table_name, column_name)
             )",
-            Self::quote_identifier(&self.schema_expect.clone())
+            Self::quote_identifier(&self.schema_expect.clone()),
+            Self::quote_identifier(SCHEMA_METADATA_TABLE)
         );
 
         sqlx::query(&query)
@@ -61,11 +65,12 @@ impl PostgresDestination {
         let query_raw = format!(
             r#"
             SELECT schema_name, table_name, column_name, data_type, nullable
-            FROM {}."_cdc_schema_metadata"
+            FROM {}.{}
             WHERE schema_name = $1
             ORDER BY schema_name, table_name, column_name
         "#,
-            Self::quote_identifier(&self.schema_expect.clone())
+            Self::quote_identifier(&self.schema_expect.clone()),
+            Self::quote_identifier(SCHEMA_METADATA_TABLE)
         );
 
         let rows = sqlx::query(&query_raw)
@@ -121,11 +126,12 @@ impl PostgresDestination {
             .expect("Failed to create table");
 
         let insert_query = format!(
-            r#"INSERT INTO {}."_cdc_schema_metadata" (schema_name, table_name, column_name, data_type, nullable)
+            r#"INSERT INTO {}.{} (schema_name, table_name, column_name, data_type, nullable)
                VALUES ($1, $2, $3, $4, $5)
                ON CONFLICT (schema_name, table_name, column_name)
                DO UPDATE SET data_type = EXCLUDED.data_type, nullable = EXCLUDED.nullable, last_updated = NOW()"#,
-            Self::quote_identifier(&self.schema_expect.clone())
+            Self::quote_identifier(&self.schema_expect.clone()),
+            Self::quote_identifier(SCHEMA_METADATA_TABLE)
         );
 
         for (col_name, col_type) in columns {
@@ -165,11 +171,12 @@ impl PostgresDestination {
 
         // Cập nhật metadata
         let insert_query = format!(
-            r#"INSERT INTO {}."_cdc_schema_metadata" (schema_name, table_name, column_name, data_type, nullable)
+            r#"INSERT INTO {}.{} (schema_name, table_name, column_name, data_type, nullable)
                VALUES ($1, $2, $3, $4, $5)
                ON CONFLICT (schema_name, table_name, column_name)
                DO UPDATE SET data_type = EXCLUDED.data_type, nullable = EXCLUDED.nullable, last_updated = NOW()"#,
-            Self::quote_identifier(&self.schema_expect.clone())
+            Self::quote_identifier(&self.schema_expect.clone()),
+            Self::quote_identifier(SCHEMA_METADATA_TABLE)
         );
         if let Err(e) = sqlx::query(&insert_query)
             .bind(&self.schema_expect)
