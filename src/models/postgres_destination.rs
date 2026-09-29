@@ -1,12 +1,11 @@
 use std::collections::{HashMap, HashSet};
 
-use base64::{Engine, engine::general_purpose};
 use chrono::{DateTime, Datelike, Timelike};
 use serde_json::Value;
 use sqlx::{PgPool, Row, postgres::PgPoolOptions, types::Json};
 use uuid::Uuid;
 
-use crate::models::{DataModel, NatMessageReceive, models_info::DecimalModel};
+use crate::models::{DataModel, NatMessageReceive, decimal::decode_base64_decimal, models_info::DecimalModel};
 
 pub struct PostgresDestination {
     pub database_url: String,
@@ -183,35 +182,6 @@ impl PostgresDestination {
                 schema_name, table_name, col_name, e
             );
         }
-    }
-
-    fn convert_base64_to_decimal(base64_value: &str, scale: i32) -> Option<f64> {
-        // Decode base64
-        let bytes = general_purpose::STANDARD
-            .decode(base64_value)
-            .expect("invalid base64");
-
-        if bytes.is_empty() {
-            return Some(0.0);
-        }
-
-        let num_bytes = bytes.len();
-        let mut raw: i64 = 0;
-        for b in &bytes {
-            raw = (raw << 8) | (*b as i64);
-        }
-
-        // Sign-extend: nếu bit cao nhất của byte đầu là 1 thì đây là số âm
-        if bytes[0] & 0x80 != 0 {
-            // Điền 1 vào các bit cao hơn num_bytes*8
-            let bits = num_bytes * 8;
-            if bits < 64 {
-                raw |= !((1i64 << bits) - 1);
-            }
-        }
-
-        let value = raw as f64 / 10_f64.powi(scale);
-        Some(value)
     }
 
     fn remove_duplicate_data<'a>(
@@ -496,7 +466,7 @@ impl PostgresDestination {
                             if let Ok(decimal_model) =
                                 serde_json::from_value::<DecimalModel>(v.clone())
                             {
-                                if let Some(f64_value) = Self::convert_base64_to_decimal(
+                                if let Some(f64_value) = decode_base64_decimal(
                                     &decimal_model.value,
                                     decimal_model.scale,
                                 ) {

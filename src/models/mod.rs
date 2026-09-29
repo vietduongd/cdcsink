@@ -1,4 +1,5 @@
 mod data_record;
+mod decimal;
 mod models_info;
 mod nats_receive;
 mod postgres_destination;
