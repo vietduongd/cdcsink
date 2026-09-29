@@ -187,7 +187,10 @@ impl DataRecord {
                 continue;
             }
             let data_type = if field_type == "org.apache.kafka.connect.data.Decimal" {
-                Some(DataRecord::kafka_decimal(value.unwrap(), item.parameters.as_ref()))
+                Some(DataRecord::kafka_decimal(
+                    value.unwrap(),
+                    item.parameters.as_ref(),
+                ))
             } else {
                 DataRecord::look_up_data_type(&field_type, value.unwrap())
             }

@@ -1,6 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
-    str::from_utf8, time::Duration,
+    time::Duration,
 };
 
 use async_nats::{
@@ -11,10 +11,7 @@ use async_nats::{
 use async_nats::jetstream::consumer::PullConsumer;
 use futures_util::StreamExt;
 
-use crate::models::{
-    DataModel, DataRecord, RowAction, SyncConfig,
-    sync_config::classify,
-};
+use crate::models::{DataModel, DataRecord, RowAction, SyncConfig, sync_config::classify};
 
 pub struct NatsReceive {
     pub url: String,
