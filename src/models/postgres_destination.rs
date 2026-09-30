@@ -58,26 +58,29 @@ impl PostgresDestination {
         Ok(())
     }
 
+    /// Table/cột đang thực sự có trong schema đích (đọc từ pg_catalog).
+    /// Không dựa vào `_cdc_schema_metadata`: table/cột bị drop bằng tay mà metadata vẫn còn
+    /// sẽ làm cdcsink bỏ qua CREATE TABLE / ADD COLUMN rồi insert lỗi "does not exist".
     pub async fn get_schema_info(
         &self,
         pool: &PgPool,
     ) -> Result<HashMap<String, HashSet<String>>, String> {
-        let query_raw = format!(
+        let rows = sqlx::query(
             r#"
-            SELECT schema_name, table_name, column_name, data_type, nullable
-            FROM {}.{}
-            WHERE schema_name = $1
-            ORDER BY schema_name, table_name, column_name
+            SELECT c.relname::text AS table_name, a.attname::text AS column_name
+            FROM pg_catalog.pg_attribute a
+            JOIN pg_catalog.pg_class c ON c.oid = a.attrelid
+            JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+            WHERE n.nspname = $1
+              AND c.relkind IN ('r', 'p')
+              AND a.attnum > 0
+              AND NOT a.attisdropped
         "#,
-            Self::quote_identifier(&self.schema_expect.clone()),
-            Self::quote_identifier(SCHEMA_METADATA_TABLE)
-        );
-
-        let rows = sqlx::query(&query_raw)
-            .bind(&self.schema_expect)
-            .fetch_all(pool)
-            .await
-            .map_err(|e| format!("Failed to fetch schema info: {}", e))?;
+        )
+        .bind(&self.schema_expect)
+        .fetch_all(pool)
+        .await
+        .map_err(|e| format!("Failed to fetch schema info: {}", e))?;
         let mut result: HashMap<String, HashSet<String>> = HashMap::new();
         for item in rows {
             let column_name = item.get::<String, _>("column_name");
@@ -86,7 +89,66 @@ impl PostgresDestination {
                 .or_insert(HashSet::new())
                 .insert(column_name);
         }
+        self.report_metadata_drift(&result, pool).await;
         Ok(result)
+    }
+
+    /// Log table/cột có trong `_cdc_schema_metadata` nhưng không còn ở đích (sẽ được tạo lại).
+    async fn report_metadata_drift(
+        &self,
+        actual: &HashMap<String, HashSet<String>>,
+        pool: &PgPool,
+    ) {
+        let query_raw = format!(
+            "SELECT table_name, column_name FROM {}.{} WHERE schema_name = $1",
+            Self::quote_identifier(&self.schema_expect),
+            Self::quote_identifier(SCHEMA_METADATA_TABLE)
+        );
+        let rows = match sqlx::query(&query_raw)
+            .bind(&self.schema_expect)
+            .fetch_all(pool)
+            .await
+        {
+            Ok(rows) => rows,
+            Err(e) => {
+                eprintln!("Failed to read {}: {}", SCHEMA_METADATA_TABLE, e);
+                return;
+            }
+        };
+        let mut missing_tables: HashSet<String> = HashSet::new();
+        let mut missing_columns: Vec<String> = Vec::new();
+        for row in rows {
+            let table_name = row.get::<String, _>("table_name");
+            let column_name = row.get::<String, _>("column_name");
+            match actual.get(&table_name) {
+                None => {
+                    missing_tables.insert(table_name);
+                }
+                Some(columns) if !columns.contains(&column_name) => {
+                    missing_columns.push(format!("{}.{}", table_name, column_name));
+                }
+                Some(_) => {}
+            }
+        }
+        if !missing_tables.is_empty() {
+            let mut names: Vec<String> = missing_tables.into_iter().collect();
+            names.sort();
+            eprintln!(
+                "Tables in {} but missing in schema {} (will be recreated): {}",
+                SCHEMA_METADATA_TABLE,
+                self.schema_expect,
+                names.join(", ")
+            );
+        }
+        if !missing_columns.is_empty() {
+            missing_columns.sort();
+            eprintln!(
+                "Columns in {} but missing in schema {} (will be re-added): {}",
+                SCHEMA_METADATA_TABLE,
+                self.schema_expect,
+                missing_columns.join(", ")
+            );
+        }
     }
 
     pub async fn create_table_if_not_exists_query(

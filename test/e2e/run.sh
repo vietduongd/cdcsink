@@ -9,6 +9,7 @@
 #   setup.sql   : tạo table + dữ liệu ban đầu ở nguồn (đi qua snapshot, op = "r")
 #   changes.sql : thay đổi sau snapshot (đi qua streaming, op = c/u/d) — tùy chọn
 #   verify.sql  : các lệnh SELECT e2e_check(...) chạy trên DB đích
+#   sink-before-changes.sql : (tùy chọn) chạy trên DB đích sau snapshot, rồi restart cdcsink
 #
 # Biến môi trường: WAIT_TIMEOUT (giây, mặc định 120), KEEP=1.
 
@@ -73,6 +74,13 @@ run_suite() {
     $DC up -d >/dev/null 2>&1
     echo " - chờ snapshot đi hết pipeline..."
     wait_marker snapshot || stalled=1
+
+    # Tùy chọn: sửa DB đích sau snapshot (vd drop table bằng tay) rồi khởi động lại cdcsink
+    if [[ $stalled == 0 && -f "$dir/sink-before-changes.sql" ]]; then
+        echo " - chạy sink-before-changes.sql trên đích, restart cdcsink..."
+        sink_psql < "$dir/sink-before-changes.sql"
+        $DC restart cdcsink >/dev/null 2>&1
+    fi
 
     if [[ $stalled == 0 && -f "$dir/changes.sql" ]]; then
         echo " - chạy changes.sql..."
