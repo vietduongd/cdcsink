@@ -3,10 +3,10 @@ use std::collections::{HashMap, HashSet};
 use base64::{Engine, engine::general_purpose};
 use serde_json::Value;
 use sqlx::{PgPool, Row, postgres::PgPoolOptions};
+use tracing::{error, warn};
 
 use crate::models::{
-    DataModel, NatMessageReceive, RowAction, decimal::decimal_text,
-    sync_config::primary_key_column,
+    DataModel, NatMessageReceive, RowAction, decimal::decimal_text, sync_config::primary_key_column,
 };
 
 /// Table metadata cdcsink tự tạo ở DB đích.
@@ -111,7 +111,7 @@ impl PostgresDestination {
         {
             Ok(rows) => rows,
             Err(e) => {
-                eprintln!("Failed to read {}: {}", SCHEMA_METADATA_TABLE, e);
+                error!(table = SCHEMA_METADATA_TABLE, error = %e, "Failed to read schema metadata");
                 return;
             }
         };
@@ -133,20 +133,20 @@ impl PostgresDestination {
         if !missing_tables.is_empty() {
             let mut names: Vec<String> = missing_tables.into_iter().collect();
             names.sort();
-            eprintln!(
-                "Tables in {} but missing in schema {} (will be recreated): {}",
-                SCHEMA_METADATA_TABLE,
-                self.schema_expect,
-                names.join(", ")
+            warn!(
+                schema = %self.schema_expect,
+                tables = %names.join(", "),
+                "Tables in {} but missing in schema (will be recreated)",
+                SCHEMA_METADATA_TABLE
             );
         }
         if !missing_columns.is_empty() {
             missing_columns.sort();
-            eprintln!(
-                "Columns in {} but missing in schema {} (will be re-added): {}",
-                SCHEMA_METADATA_TABLE,
-                self.schema_expect,
-                missing_columns.join(", ")
+            warn!(
+                schema = %self.schema_expect,
+                columns = %missing_columns.join(", "),
+                "Columns in {} but missing in schema (will be re-added)",
+                SCHEMA_METADATA_TABLE
             );
         }
     }
@@ -225,9 +225,12 @@ impl PostgresDestination {
             col_type.data_type,
         );
         if let Err(e) = sqlx::query(&alter_query).execute(pool).await {
-            eprintln!(
-                "Failed to add column {}.{}.{}: {}",
-                schema_name, table_name, col_name, e
+            error!(
+                schema = %schema_name,
+                table = %table_name,
+                column = %col_name,
+                error = %e,
+                "Failed to add column"
             );
         }
 
@@ -249,9 +252,12 @@ impl PostgresDestination {
             .execute(pool)
             .await
         {
-            eprintln!(
-                "Failed to upsert schema metadata for {}.{}.{}: {}",
-                schema_name, table_name, col_name, e
+            error!(
+                schema = %schema_name,
+                table = %table_name,
+                column = %col_name,
+                error = %e,
+                "Failed to upsert schema metadata"
             );
         }
     }
@@ -294,10 +300,9 @@ impl PostgresDestination {
         }
 
         // Tách message delete và upsert
-        let (to_delete, to_upsert): (Vec<&NatMessageReceive>, Vec<&NatMessageReceive>) =
-            columns
-                .into_iter()
-                .partition(|msg| msg.action == RowAction::Delete);
+        let (to_delete, to_upsert): (Vec<&NatMessageReceive>, Vec<&NatMessageReceive>) = columns
+            .into_iter()
+            .partition(|msg| msg.action == RowAction::Delete);
 
         let table = format!(
             "{}.{}",
@@ -316,7 +321,7 @@ impl PostgresDestination {
         let primary_key = match primary_key_column(column_active) {
             Some(pk) => pk.clone(),
             None => {
-                eprintln!("Missing id column for upsert into table {}", table_name);
+                error!(table = %table_name, "Missing id column for upsert");
                 return;
             }
         };
@@ -389,7 +394,7 @@ impl PostgresDestination {
         let primary_key = match primary_key_column(&to_delete[0].table_value) {
             Some(pk) => pk.clone(),
             None => {
-                eprintln!("Missing id column for delete in table {}", table_name);
+                error!(table = %table_name, "Missing id column for delete");
                 return;
             }
         };
@@ -405,7 +410,7 @@ impl PostgresDestination {
             .map(|m| m.table_value.get(&primary_key).and_then(Self::to_pg_text))
             .collect();
         if let Err(e) = sqlx::query(&delete_query_str).bind(ids).execute(pool).await {
-            eprintln!("Failed to execute delete for table {}: {}", table_name, e);
+            error!(table = %table_name, error = %e, "Failed to execute delete");
         }
     }
 
@@ -482,8 +487,14 @@ mod tests {
     #[test]
     fn quotes_every_identifier() {
         assert_eq!(PostgresDestination::quote_identifier("order"), "\"order\"");
-        assert_eq!(PostgresDestination::quote_identifier("customer list"), "\"customer list\"");
-        assert_eq!(PostgresDestination::quote_identifier("OrderItems"), "\"OrderItems\"");
+        assert_eq!(
+            PostgresDestination::quote_identifier("customer list"),
+            "\"customer list\""
+        );
+        assert_eq!(
+            PostgresDestination::quote_identifier("OrderItems"),
+            "\"OrderItems\""
+        );
         assert_eq!(PostgresDestination::quote_identifier("a\"b"), "\"a\"\"b\"");
     }
 
@@ -491,21 +502,45 @@ mod tests {
     fn text_for_each_type() {
         let text = |t: &str, v: Value| PostgresDestination::to_pg_text(&model(t, v));
         assert_eq!(text("TEXT", Value::Null), None);
-        assert_eq!(text("TEXT", json!("it's \"x\"")).as_deref(), Some("it's \"x\""));
-        assert_eq!(text("DATE", json!("2024-02-29")).as_deref(), Some("2024-02-29"));
+        assert_eq!(
+            text("TEXT", json!("it's \"x\"")).as_deref(),
+            Some("it's \"x\"")
+        );
+        assert_eq!(
+            text("DATE", json!("2024-02-29")).as_deref(),
+            Some("2024-02-29")
+        );
         assert_eq!(text("DOUBLE PRECISION", json!(3.5)).as_deref(), Some("3.5"));
-        assert_eq!(text("DOUBLE PRECISION", json!("NaN")).as_deref(), Some("NaN"));
-        assert_eq!(text("BIGINT", json!(9223372036854775807i64)).as_deref(), Some("9223372036854775807"));
+        assert_eq!(
+            text("DOUBLE PRECISION", json!("NaN")).as_deref(),
+            Some("NaN")
+        );
+        assert_eq!(
+            text("BIGINT", json!(9223372036854775807i64)).as_deref(),
+            Some("9223372036854775807")
+        );
         assert_eq!(text("BOOLEAN", json!(true)).as_deref(), Some("true"));
-        assert_eq!(text("NUMERIC", json!({"scale": 2, "value": "AeI="})).as_deref(), Some("4.82"));
+        assert_eq!(
+            text("NUMERIC", json!({"scale": 2, "value": "AeI="})).as_deref(),
+            Some("4.82")
+        );
         assert_eq!(text("BYTEA", json!("AQL/")).as_deref(), Some("\\x0102ff"));
-        assert_eq!(text("JSONB", json!("{\"a\": 1}")).as_deref(), Some("{\"a\": 1}"));
+        assert_eq!(
+            text("JSONB", json!("{\"a\": 1}")).as_deref(),
+            Some("{\"a\": 1}")
+        );
         assert_eq!(text("JSONB", json!("\"s\"")).as_deref(), Some("\"s\""));
-        assert_eq!(text("JSONB", json!("not json")).as_deref(), Some("\"not json\""));
+        assert_eq!(
+            text("JSONB", json!("not json")).as_deref(),
+            Some("\"not json\"")
+        );
         assert_eq!(
             text("ARRAY", json!(["a,b", "c\"d", "e\\f", null, ""])).as_deref(),
             Some(r#"{"a,b","c\"d","e\\f",NULL,""}"#)
         );
-        assert_eq!(text("ARRAY", json!([[1, 2], [3, 4]])).as_deref(), Some(r#"{{"1","2"},{"3","4"}}"#));
+        assert_eq!(
+            text("ARRAY", json!([[1, 2], [3, 4]])).as_deref(),
+            Some(r#"{{"1","2"},{"3","4"}}"#)
+        );
     }
 }

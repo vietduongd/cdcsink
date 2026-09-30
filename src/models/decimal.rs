@@ -107,13 +107,19 @@ mod tests {
     #[test]
     fn decodes_positive_decimal() {
         // 0x01E2 = 482, scale 2
-        assert_eq!(decode_base64_decimal_exact("AeI=", 2).as_deref(), Some("4.82"));
+        assert_eq!(
+            decode_base64_decimal_exact("AeI=", 2).as_deref(),
+            Some("4.82")
+        );
     }
 
     #[test]
     fn decodes_negative_decimal() {
         // 0xFE1E = -482 (two's complement), scale 2
-        assert_eq!(decode_base64_decimal_exact("/h4=", 2).as_deref(), Some("-4.82"));
+        assert_eq!(
+            decode_base64_decimal_exact("/h4=", 2).as_deref(),
+            Some("-4.82")
+        );
     }
 
     #[test]
@@ -134,7 +140,10 @@ mod tests {
 
     #[test]
     fn numeric_value_reads_debezium_decimal_object() {
-        assert_eq!(numeric_value(&json!({"scale": 2, "value": "AeI="})), Some(4.82));
+        assert_eq!(
+            numeric_value(&json!({"scale": 2, "value": "AeI="})),
+            Some(4.82)
+        );
     }
 
     #[test]
@@ -165,17 +174,32 @@ mod tests {
 
     #[test]
     fn decodes_small_fraction_and_scale_zero() {
-        assert_eq!(decode_base64_decimal_exact("AQ==", 10).as_deref(), Some("0.0000000001"));
-        assert_eq!(decode_base64_decimal_exact("/w==", 3).as_deref(), Some("-0.001"));
-        assert_eq!(decode_base64_decimal_exact("AeI=", 0).as_deref(), Some("482"));
+        assert_eq!(
+            decode_base64_decimal_exact("AQ==", 10).as_deref(),
+            Some("0.0000000001")
+        );
+        assert_eq!(
+            decode_base64_decimal_exact("/w==", 3).as_deref(),
+            Some("-0.001")
+        );
+        assert_eq!(
+            decode_base64_decimal_exact("AeI=", 0).as_deref(),
+            Some("482")
+        );
         assert_eq!(decode_base64_decimal_exact("", 2).as_deref(), Some("0.00"));
         // 0x0080 = 128 dương dù byte sau có bit cao
-        assert_eq!(decode_base64_decimal_exact("AIA=", 1).as_deref(), Some("12.8"));
+        assert_eq!(
+            decode_base64_decimal_exact("AIA=", 1).as_deref(),
+            Some("12.8")
+        );
     }
 
     #[test]
     fn decimal_text_reads_all_forms() {
-        assert_eq!(decimal_text(&json!({"scale": 2, "value": "AeI="})).as_deref(), Some("4.82"));
+        assert_eq!(
+            decimal_text(&json!({"scale": 2, "value": "AeI="})).as_deref(),
+            Some("4.82")
+        );
         assert_eq!(decimal_text(&json!(1.5)).as_deref(), Some("1.5"));
         assert_eq!(decimal_text(&json!("7.25")).as_deref(), Some("7.25"));
         assert_eq!(decimal_text(&Value::Null), None);

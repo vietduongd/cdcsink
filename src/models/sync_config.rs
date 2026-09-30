@@ -139,7 +139,10 @@ impl SyncConfig {
         if errors.is_empty() {
             Ok(config)
         } else {
-            Err(format!("Invalid sync config:\n  - {}", errors.join("\n  - ")))
+            Err(format!(
+                "Invalid sync config:\n  - {}",
+                errors.join("\n  - ")
+            ))
         }
     }
 
@@ -163,7 +166,10 @@ impl SyncConfig {
 fn parse_table(name: &str, raw: RawTable, errors: &mut Vec<String>) -> TableConfig {
     let columns = match (raw.include, raw.exclude) {
         (Some(_), Some(_)) => {
-            errors.push(format!("tables.{}: cannot set both include and exclude", name));
+            errors.push(format!(
+                "tables.{}: cannot set both include and exclude",
+                name
+            ));
             ColumnSelection::All
         }
         (Some(cols), None) if cols.is_empty() => {
@@ -360,7 +366,11 @@ fn eval_condition(condition: &Condition, actual: Option<&Value>) -> Result<bool,
             if !comparable {
                 return Err(last_error.unwrap_or_else(|| "empty value list".to_string()));
             }
-            Ok(if condition.op == Op::In { found } else { !found })
+            Ok(if condition.op == Op::In {
+                found
+            } else {
+                !found
+            })
         }
         Op::Gt | Op::Gte | Op::Lt | Op::Lte => {
             let ordering = compare_order(actual, &condition.value)?;
@@ -459,7 +469,10 @@ tables:
         assert_eq!(orders.conditions[2].value, Value::Null);
 
         let users = cfg.table("users").unwrap();
-        assert_eq!(users.columns, ColumnSelection::Exclude(vec!["password_hash".into()]));
+        assert_eq!(
+            users.columns,
+            ColumnSelection::Exclude(vec!["password_hash".into()])
+        );
         assert!(users.conditions.is_empty());
 
         let logs = cfg.table("logs").unwrap();
@@ -500,17 +513,35 @@ tables:
 "#,
         );
         assert!(err.starts_with("Invalid sync config:"), "{err}");
-        assert!(err.contains("tables: 'Orders' and 'orders' collide (case-insensitive)"), "{err}");
-        assert!(err.contains("tables.users: include must not be empty"), "{err}");
-        assert!(err.contains("tables.users.where[0]: op 'is_null' must not have a value"), "{err}");
-        assert!(err.contains("tables.users.where[1]: op 'eq' requires a scalar value"), "{err}");
-        assert!(err.contains("tables.users.where[2]: op 'gt' requires a scalar value"), "{err}");
+        assert!(
+            err.contains("tables: 'Orders' and 'orders' collide (case-insensitive)"),
+            "{err}"
+        );
+        assert!(
+            err.contains("tables.users: include must not be empty"),
+            "{err}"
+        );
+        assert!(
+            err.contains("tables.users.where[0]: op 'is_null' must not have a value"),
+            "{err}"
+        );
+        assert!(
+            err.contains("tables.users.where[1]: op 'eq' requires a scalar value"),
+            "{err}"
+        );
+        assert!(
+            err.contains("tables.users.where[2]: op 'gt' requires a scalar value"),
+            "{err}"
+        );
     }
 
     #[test]
     fn rejects_include_and_exclude_together() {
         let err = config_error("tables:\n  orders:\n    include: [id]\n    exclude: [x]\n");
-        assert!(err.contains("tables.orders: cannot set both include and exclude"), "{err}");
+        assert!(
+            err.contains("tables.orders: cannot set both include and exclude"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -525,9 +556,22 @@ tables:
       - { column: status, op: like, value: "p%" }
 "#,
         );
-        assert!(err.contains("tables.orders.where[0]: op 'in' requires a non-empty array of scalar values"), "{err}");
-        assert!(err.contains("tables.orders.where[1]: op 'not_in' requires a non-empty array of scalar values"), "{err}");
-        assert!(err.contains("tables.orders.where[2]: unknown op 'like'"), "{err}");
+        assert!(
+            err.contains(
+                "tables.orders.where[0]: op 'in' requires a non-empty array of scalar values"
+            ),
+            "{err}"
+        );
+        assert!(
+            err.contains(
+                "tables.orders.where[1]: op 'not_in' requires a non-empty array of scalar values"
+            ),
+            "{err}"
+        );
+        assert!(
+            err.contains("tables.orders.where[2]: unknown op 'like'"),
+            "{err}"
+        );
     }
 
     // Review Focus #2: gõ sai key không được âm thầm bỏ qua
@@ -535,9 +579,11 @@ tables:
     fn rejects_unknown_keys() {
         let err = config_error("tables:\n  users:\n    exlude: [password_hash]\n");
         assert!(err.contains("unknown field"), "{err}");
-        let err = config_error("tables:\n  users:\n    wher:\n      - { column: a, op: eq, value: 1 }\n");
+        let err =
+            config_error("tables:\n  users:\n    wher:\n      - { column: a, op: eq, value: 1 }\n");
         assert!(err.contains("unknown field"), "{err}");
-        let err = config_error("tables:\n  users:\n    where:\n      - { colum: a, op: eq, value: 1 }\n");
+        let err =
+            config_error("tables:\n  users:\n    where:\n      - { colum: a, op: eq, value: 1 }\n");
         assert!(err.contains("unknown field"), "{err}");
     }
 
@@ -574,7 +620,12 @@ tables:
     #[test]
     fn include_keeps_listed_columns_and_always_id() {
         let cfg = config("tables:\n  orders:\n    include: [total, status]\n");
-        let mut r = row(&[("id", json!(1)), ("total", json!(10)), ("status", json!("paid")), ("secret", json!("x"))]);
+        let mut r = row(&[
+            ("id", json!(1)),
+            ("total", json!(10)),
+            ("status", json!("paid")),
+            ("secret", json!("x")),
+        ]);
         cfg.table("orders").unwrap().retain_columns(&mut r);
         assert_eq!(sorted_keys(&r), vec!["id", "status", "total"]);
     }
@@ -582,7 +633,11 @@ tables:
     #[test]
     fn exclude_drops_listed_columns_but_never_id() {
         let cfg = config("tables:\n  users:\n    exclude: [password_hash, id]\n");
-        let mut r = row(&[("id", json!(1)), ("name", json!("a")), ("password_hash", json!("h"))]);
+        let mut r = row(&[
+            ("id", json!(1)),
+            ("name", json!("a")),
+            ("password_hash", json!("h")),
+        ]);
         cfg.table("users").unwrap().retain_columns(&mut r);
         assert_eq!(sorted_keys(&r), vec!["id", "name"]);
     }
@@ -590,7 +645,11 @@ tables:
     #[test]
     fn column_names_match_case_insensitively() {
         let cfg = config("tables:\n  UserAccounts:\n    exclude: [passwordhash]\n");
-        let mut r = row(&[("id", json!(1)), ("UserName", json!("a")), ("PasswordHash", json!("h"))]);
+        let mut r = row(&[
+            ("id", json!(1)),
+            ("UserName", json!("a")),
+            ("PasswordHash", json!("h")),
+        ]);
         cfg.table("UserAccounts").unwrap().retain_columns(&mut r);
         assert_eq!(sorted_keys(&r), vec!["UserName", "id"]);
     }
@@ -598,7 +657,11 @@ tables:
     #[test]
     fn exact_column_match_wins_over_case_insensitive() {
         let cfg = config("tables:\n  t:\n    include: [Status]\n");
-        let mut r = row(&[("id", json!(1)), ("Status", json!("a")), ("status", json!("b"))]);
+        let mut r = row(&[
+            ("id", json!(1)),
+            ("Status", json!("a")),
+            ("status", json!("b")),
+        ]);
         cfg.table("t").unwrap().retain_columns(&mut r);
         assert_eq!(sorted_keys(&r), vec!["Status", "id"]);
     }
@@ -624,7 +687,14 @@ tables:
     fn no_conditions_always_matches() {
         let cfg = config("tables:\n  t:\n    exclude: [x]\n");
         let outcome = cfg.table("t").unwrap().matches(&row(&[("id", json!(1))]));
-        assert_eq!(outcome, MatchOutcome { matched: true, type_errors: vec![], missing_columns: vec![] });
+        assert_eq!(
+            outcome,
+            MatchOutcome {
+                matched: true,
+                type_errors: vec![],
+                missing_columns: vec![]
+            }
+        );
     }
 
     #[test]
@@ -643,14 +713,41 @@ tables:
 
     #[test]
     fn string_comparisons_including_dates() {
-        let r = [("status", json!("paid")), ("created_at", json!("2025-03-01 10:00:00"))];
+        let r = [
+            ("status", json!("paid")),
+            ("created_at", json!("2025-03-01 10:00:00")),
+        ];
         assert!(check("      - { column: status, op: eq, value: paid }\n", &r).matched);
         // giá trị so chính xác, phân biệt hoa thường
         assert!(!check("      - { column: status, op: eq, value: Paid }\n", &r).matched);
-        assert!(check("      - { column: status, op: in, value: [paid, shipped] }\n", &r).matched);
-        assert!(!check("      - { column: status, op: not_in, value: [paid, shipped] }\n", &r).matched);
-        assert!(check("      - { column: created_at, op: gte, value: \"2025-01-01\" }\n", &r).matched);
-        assert!(!check("      - { column: created_at, op: lt, value: \"2025-01-01\" }\n", &r).matched);
+        assert!(
+            check(
+                "      - { column: status, op: in, value: [paid, shipped] }\n",
+                &r
+            )
+            .matched
+        );
+        assert!(
+            !check(
+                "      - { column: status, op: not_in, value: [paid, shipped] }\n",
+                &r
+            )
+            .matched
+        );
+        assert!(
+            check(
+                "      - { column: created_at, op: gte, value: \"2025-01-01\" }\n",
+                &r
+            )
+            .matched
+        );
+        assert!(
+            !check(
+                "      - { column: created_at, op: lt, value: \"2025-01-01\" }\n",
+                &r
+            )
+            .matched
+        );
     }
 
     #[test]
@@ -679,31 +776,68 @@ tables:
         let null_row = [("deleted_at", Value::Null)];
         assert!(check("      - { column: deleted_at, op: is_null }\n", &null_row).matched);
         assert!(!check("      - { column: deleted_at, op: not_null }\n", &null_row).matched);
-        assert!(!check("      - { column: deleted_at, op: eq, value: x }\n", &null_row).matched);
-        assert!(!check("      - { column: deleted_at, op: ne, value: x }\n", &null_row).matched);
-        assert!(!check("      - { column: deleted_at, op: not_in, value: [x] }\n", &null_row).matched);
+        assert!(
+            !check(
+                "      - { column: deleted_at, op: eq, value: x }\n",
+                &null_row
+            )
+            .matched
+        );
+        assert!(
+            !check(
+                "      - { column: deleted_at, op: ne, value: x }\n",
+                &null_row
+            )
+            .matched
+        );
+        assert!(
+            !check(
+                "      - { column: deleted_at, op: not_in, value: [x] }\n",
+                &null_row
+            )
+            .matched
+        );
 
         let missing: [(&str, Value); 0] = [];
         assert!(check("      - { column: deleted_at, op: is_null }\n", &missing).matched);
         assert!(!check("      - { column: deleted_at, op: not_null }\n", &missing).matched);
-        let outcome = check("      - { column: deleted_at, op: eq, value: x }\n", &missing);
-        assert_eq!(outcome, MatchOutcome { matched: false, type_errors: vec![], missing_columns: vec!["deleted_at".to_string()] });
+        let outcome = check(
+            "      - { column: deleted_at, op: eq, value: x }\n",
+            &missing,
+        );
+        assert_eq!(
+            outcome,
+            MatchOutcome {
+                matched: false,
+                type_errors: vec![],
+                missing_columns: vec!["deleted_at".to_string()]
+            }
+        );
     }
 
     // Tên cột sai trong where làm mọi dòng bị xóa: phải được báo để log
     #[test]
     fn missing_where_column_is_reported_but_null_is_not() {
-        let outcome = check("      - { column: tenant_idd, op: eq, value: 5 }\n", &[("tenant_id", json!(5))]);
+        let outcome = check(
+            "      - { column: tenant_idd, op: eq, value: 5 }\n",
+            &[("tenant_id", json!(5))],
+        );
         assert!(!outcome.matched);
         assert_eq!(outcome.missing_columns, vec!["tenant_idd".to_string()]);
         assert!(outcome.type_errors.is_empty());
 
-        let outcome = check("      - { column: tenant_id, op: eq, value: 5 }\n", &[("tenant_id", Value::Null)]);
+        let outcome = check(
+            "      - { column: tenant_id, op: eq, value: 5 }\n",
+            &[("tenant_id", Value::Null)],
+        );
         assert!(!outcome.matched);
         assert!(outcome.missing_columns.is_empty());
 
         // is_null trên cột thiếu vẫn khớp và không bị coi là lỗi
-        let outcome = check("      - { column: deleted_at, op: is_null }\n", &[("id", json!(1))]);
+        let outcome = check(
+            "      - { column: deleted_at, op: is_null }\n",
+            &[("id", json!(1))],
+        );
         assert!(outcome.matched);
         assert!(outcome.missing_columns.is_empty());
     }
@@ -711,14 +845,24 @@ tables:
     // Review Focus #3: "5" (chuỗi) so với cột số phải báo type error
     #[test]
     fn type_mismatch_is_false_and_reported() {
-        let outcome = check("      - { column: tenant_id, op: eq, value: \"5\" }\n", &[("tenant_id", json!(5))]);
+        let outcome = check(
+            "      - { column: tenant_id, op: eq, value: \"5\" }\n",
+            &[("tenant_id", json!(5))],
+        );
         assert!(!outcome.matched);
         assert_eq!(outcome.type_errors.len(), 1);
         assert_eq!(outcome.type_errors[0].column, "tenant_id");
         assert_eq!(outcome.type_errors[0].op, Op::Eq);
-        assert!(outcome.type_errors[0].detail.contains("number"), "{:?}", outcome.type_errors[0]);
+        assert!(
+            outcome.type_errors[0].detail.contains("number"),
+            "{:?}",
+            outcome.type_errors[0]
+        );
 
-        let outcome = check("      - { column: name, op: gt, value: 3 }\n", &[("name", json!("abc"))]);
+        let outcome = check(
+            "      - { column: name, op: gt, value: 3 }\n",
+            &[("name", json!("abc"))],
+        );
         assert!(!outcome.matched);
         assert_eq!(outcome.type_errors.len(), 1);
     }
@@ -733,7 +877,13 @@ tables:
 
     #[test]
     fn where_column_names_match_case_insensitively() {
-        assert!(check("      - { column: tenantid, op: eq, value: 5 }\n", &[("TenantId", json!(5))]).matched);
+        assert!(
+            check(
+                "      - { column: tenantid, op: eq, value: 5 }\n",
+                &[("TenantId", json!(5))]
+            )
+            .matched
+        );
     }
 
     #[test]
@@ -754,8 +904,22 @@ tables:
     #[test]
     fn classify_by_where() {
         let t = table_with_where("      - { column: status, op: eq, value: paid }\n");
-        assert_eq!(classify(&row(&[("id", json!(1)), ("status", json!("paid"))]), Some(&t)).0, RowAction::Upsert);
-        assert_eq!(classify(&row(&[("id", json!(1)), ("status", json!("new"))]), Some(&t)).0, RowAction::Delete);
+        assert_eq!(
+            classify(
+                &row(&[("id", json!(1)), ("status", json!("paid"))]),
+                Some(&t)
+            )
+            .0,
+            RowAction::Upsert
+        );
+        assert_eq!(
+            classify(
+                &row(&[("id", json!(1)), ("status", json!("new"))]),
+                Some(&t)
+            )
+            .0,
+            RowAction::Delete
+        );
     }
 
     #[test]
@@ -772,13 +936,21 @@ tables:
         let t = cfg.table("orders").unwrap();
 
         // Thứ tự đúng như nats_receive: classify trước, retain_columns sau
-        let mut r = row(&[("id", json!(1)), ("tenant_id", json!(5)), ("_PEERDB_IS_DELETED", json!(false))]);
+        let mut r = row(&[
+            ("id", json!(1)),
+            ("tenant_id", json!(5)),
+            ("_PEERDB_IS_DELETED", json!(false)),
+        ]);
         let (action, _) = classify(&r, Some(t));
         t.retain_columns(&mut r);
         assert_eq!(action, RowAction::Upsert);
         assert_eq!(sorted_keys(&r), vec!["id"]);
 
-        let mut r = row(&[("id", json!(2)), ("tenant_id", json!(5)), ("_PEERDB_IS_DELETED", json!(true))]);
+        let mut r = row(&[
+            ("id", json!(2)),
+            ("tenant_id", json!(5)),
+            ("_PEERDB_IS_DELETED", json!(true)),
+        ]);
         let (action, _) = classify(&r, Some(t));
         t.retain_columns(&mut r);
         assert_eq!(action, RowAction::Delete);
@@ -788,8 +960,16 @@ tables:
     #[test]
     fn env_value_absent_or_blank_means_no_config() {
         assert!(SyncConfig::from_env_value(None).unwrap().is_none());
-        assert!(SyncConfig::from_env_value(Some(String::new())).unwrap().is_none());
-        assert!(SyncConfig::from_env_value(Some("   ".into())).unwrap().is_none());
+        assert!(
+            SyncConfig::from_env_value(Some(String::new()))
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            SyncConfig::from_env_value(Some("   ".into()))
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
@@ -800,8 +980,11 @@ tables:
 
     #[test]
     fn example_config_file_is_valid() {
-        let cfg = SyncConfig::load(concat!(env!("CARGO_MANIFEST_DIR"), "/sync_config.example.yaml"))
-            .expect("example config must be valid");
+        let cfg = SyncConfig::load(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/sync_config.example.yaml"
+        ))
+        .expect("example config must be valid");
         assert!(cfg.table("orders").is_some());
         assert!(cfg.table("OrderItems").is_some());
         assert!(cfg.table("UserAccounts").is_some());
@@ -810,6 +993,9 @@ tables:
     #[test]
     fn load_reports_missing_file() {
         let err = SyncConfig::load("does/not/exist.yaml").expect_err("missing file");
-        assert!(err.contains("Cannot read sync config does/not/exist.yaml"), "{err}");
+        assert!(
+            err.contains("Cannot read sync config does/not/exist.yaml"),
+            "{err}"
+        );
     }
 }

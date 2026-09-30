@@ -4,20 +4,34 @@ use std::{
     error::Error,
 };
 
-use chrono::Local;
 use dotenvy::dotenv;
+use tracing::{error, info};
+use tracing_subscriber::EnvFilter;
 
 use crate::models::{NatMessageReceive, PostgresDestination, RowAction, SyncConfig};
 
 mod models;
 
+/// Mức log lấy từ RUST_LOG (mặc định info), LOG_FORMAT=json để xuất JSON cho hệ thống gom log.
+fn init_logging() {
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("info,sqlx=warn,async_nats=warn"));
+    let builder = tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_target(true);
+    if env::var("LOG_FORMAT").is_ok_and(|v| v.eq_ignore_ascii_case("json")) {
+        builder.json().flatten_event(true).init();
+    } else {
+        builder.init();
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    println!("Starting CDC Sink application...");
-
     dotenv().ok();
+    init_logging();
 
-    println!("Loading environment variables...");
+    info!(version = env!("CARGO_PKG_VERSION"), "Starting CDC Sink");
     let db_url = env::var("DATABASE_URL").expect("DATABASE_URL not set");
     let nats_url = env::var("NATS_URL").expect("NATS_URL not set");
     let topic_name = env::var("TOPIC_NAME").expect("TOPIC_NAME not set");
@@ -33,28 +47,28 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let sync_config = match SyncConfig::from_env_value(env::var("SYNC_CONFIG_PATH").ok()) {
         Ok(Some(config)) => {
-            println!(
-                "Sync config loaded: tables [{}]",
-                config.table_names().join(", ")
-            );
+            info!(tables = %config.table_names().join(", "), "Sync config loaded");
             Some(config)
         }
         Ok(None) => {
-            println!("SYNC_CONFIG_PATH not set: syncing ALL tables/columns/rows (no filter)");
+            info!("SYNC_CONFIG_PATH not set: syncing all tables/columns/rows (no filter)");
             None
         }
         Err(e) => {
-            eprintln!("{}", e);
+            error!(error = %e, "Failed to load sync config");
             std::process::exit(1);
         }
     };
 
-    println!("Configuration loaded successfully");
-    println!("NATS URL: {}", nats_url);
-    println!("Topic: {}", topic_name);
-    println!("Stream: {}", nats_stream_name);
-    println!("Consumer: {}", nats_consumer_name);
-    println!("Schema: {}", database_schema_expected);
+    info!(
+        nats_url = %nats_url,
+        topic = %topic_name,
+        stream = %nats_stream_name,
+        consumer = %nats_consumer_name,
+        schema = %database_schema_expected,
+        batch_size = number_pull_object,
+        "Configuration loaded"
+    );
 
     let nats_info = models::NatsReceive::new(
         nats_url,
@@ -89,7 +103,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         if messages.is_empty() {
             continue;
         }
-        println!("Received {} messages at {}", messages.len(), Local::now());
+        info!(count = messages.len(), "Received messages");
         let mut message_active: HashMap<String, Vec<&NatMessageReceive>> = HashMap::new();
         for msg in &messages {
             let table_name = &msg.table_name;

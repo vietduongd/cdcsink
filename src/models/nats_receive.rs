@@ -10,6 +10,7 @@ use async_nats::{
 
 use async_nats::jetstream::consumer::PullConsumer;
 use futures_util::StreamExt;
+use tracing::warn;
 
 use crate::models::{
     DataModel, DataRecord, RowAction, SyncConfig,
@@ -122,7 +123,7 @@ impl NatsReceive {
             if is_ignored_table(&table_name) {
                 let key = format!("{}|ignored", table_name);
                 if logged_type_errors.insert(key) {
-                    eprintln!("Table {} is never synced: messages are skipped", table_name);
+                    warn!(table = %table_name, "Table is never synced, messages are skipped");
                 }
                 Self::ack_skipped(&message).await?;
                 continue;
@@ -137,10 +138,7 @@ impl NatsReceive {
                 None => {
                     let key = format!("{}|no-primary-key", table_name);
                     if logged_type_errors.insert(key) {
-                        eprintln!(
-                            "Table {} has no \"id\" column: messages are skipped",
-                            table_name
-                        );
+                        warn!(table = %table_name, "Table has no \"id\" column, messages are skipped");
                     }
                     Self::ack_skipped(&message).await?;
                     continue;
@@ -158,18 +156,22 @@ impl NatsReceive {
             for error in &outcome.type_errors {
                 let key = format!("{}|{}|{:?}", table_name, error.column, error.op);
                 if logged_type_errors.insert(key) {
-                    eprintln!(
-                        "Sync filter type mismatch: table {} column {} op {:?}: {}",
-                        table_name, error.column, error.op, error.detail
+                    warn!(
+                        table = %table_name,
+                        column = %error.column,
+                        op = ?error.op,
+                        detail = %error.detail,
+                        "Sync filter type mismatch"
                     );
                 }
             }
             for column in &outcome.missing_columns {
                 let key = format!("{}|{}|missing", table_name, column);
                 if logged_type_errors.insert(key) {
-                    eprintln!(
-                        "Sync filter column not found: table {} column {} (check the name in where; rows are deleted)",
-                        table_name, column
+                    warn!(
+                        table = %table_name,
+                        column = %column,
+                        "Sync filter column not found (check the name in where; rows are deleted)"
                     );
                 }
             }
@@ -198,9 +200,10 @@ impl NatsReceive {
 
         for (table_name, (total, rejected)) in &type_rejections {
             if *total > 0 && total == rejected {
-                eprintln!(
-                    "WARNING: all {} rows of table {} rejected due to type mismatch or missing column in where",
-                    total, table_name
+                warn!(
+                    table = %table_name,
+                    total,
+                    "All rows rejected due to type mismatch or missing column in where"
                 );
             }
         }
@@ -246,7 +249,9 @@ mod tests {
         assert!(is_ignored_table("_cdc_schema_metadata"));
         assert!(is_ignored_table("_CDC_Schema_Metadata"));
         // bản _resync được chuẩn hóa trước khi kiểm tra
-        assert!(is_ignored_table(&normalize_table_name("_cdc_schema_metadata_resync")));
+        assert!(is_ignored_table(&normalize_table_name(
+            "_cdc_schema_metadata_resync"
+        )));
         assert!(!is_ignored_table("cdc_schema_metadata"));
         assert!(!is_ignored_table("orders"));
     }

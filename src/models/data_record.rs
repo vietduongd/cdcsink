@@ -275,7 +275,11 @@ impl DataRecord {
             }
             None => ("TEXT".to_string(), value.clone()),
         };
-        (format!("{}[]", element_type), "ARRAY".to_string(), converted)
+        (
+            format!("{}[]", element_type),
+            "ARRAY".to_string(),
+            converted,
+        )
     }
 
     fn look_up_data_type(data_type: &str, value: &Value) -> Option<(String, String, Value)> {
@@ -299,16 +303,24 @@ impl DataRecord {
             "timestamp" => simple("TIMESTAMP"),
             "decimal" | "io.debezium.data.VariableScaleDecimal" => simple("NUMERIC"),
             "io.debezium.time.Date" => converted("DATE", "DATE", DataRecord::convert_date(value)),
-            "io.debezium.time.Time" => {
-                converted("TIME", "TIME", DataRecord::convert_time(value, TimeUnit::Milli))
+            "io.debezium.time.Time" => converted(
+                "TIME",
+                "TIME",
+                DataRecord::convert_time(value, TimeUnit::Milli),
+            ),
+            "io.debezium.time.MicroTime" => converted(
+                "TIME",
+                "TIME",
+                DataRecord::convert_time(value, TimeUnit::Micro),
+            ),
+            "io.debezium.time.NanoTime" => converted(
+                "TIME",
+                "TIME",
+                DataRecord::convert_time(value, TimeUnit::Nano),
+            ),
+            "io.debezium.time.ZonedTime" => {
+                converted("TIME WITH TIME ZONE", "TIMETZ", value.clone())
             }
-            "io.debezium.time.MicroTime" => {
-                converted("TIME", "TIME", DataRecord::convert_time(value, TimeUnit::Micro))
-            }
-            "io.debezium.time.NanoTime" => {
-                converted("TIME", "TIME", DataRecord::convert_time(value, TimeUnit::Nano))
-            }
-            "io.debezium.time.ZonedTime" => converted("TIME WITH TIME ZONE", "TIMETZ", value.clone()),
             "io.debezium.time.Timestamp" => converted(
                 "TIMESTAMP",
                 "TIMESTAMP",
@@ -372,7 +384,7 @@ impl DataRecord {
         match chrono::TimeDelta::try_days(days).and_then(|delta| epoch.checked_add_signed(delta)) {
             Some(date) => Value::String(date.format("%Y-%m-%d").to_string()),
             None => {
-                eprintln!("Date out of range ({} days since epoch), stored as NULL", days);
+                tracing::warn!(days, "Date out of range (days since epoch), stored as NULL");
                 Value::Null
             }
         }
@@ -499,34 +511,76 @@ mod tests {
     // JsonConverter ghi float64 là "double": trước đây rơi vào TEXT và mất giá trị
     #[test]
     fn double_maps_to_double_precision() {
-        let v = converted(json!({ "type": "double", "optional": true, "field": "v" }), json!(3.5));
+        let v = converted(
+            json!({ "type": "double", "optional": true, "field": "v" }),
+            json!(3.5),
+        );
         assert_eq!(v.data_type, "DOUBLE PRECISION");
         assert_eq!(v.value, json!(3.5));
-        let v = converted(json!({ "type": "double", "optional": true, "field": "v" }), json!("NaN"));
+        let v = converted(
+            json!({ "type": "double", "optional": true, "field": "v" }),
+            json!("NaN"),
+        );
         assert_eq!(v.value, json!("NaN"));
-        let v = converted(json!({ "type": "float", "optional": true, "field": "v" }), json!(1.5));
+        let v = converted(
+            json!({ "type": "float", "optional": true, "field": "v" }),
+            json!(1.5),
+        );
         assert_eq!(v.data_type, "REAL");
     }
 
     #[test]
     fn micro_timestamp_keeps_fraction() {
         let schema = json!({ "type": "int64", "optional": true, "field": "v", "name": "io.debezium.time.MicroTimestamp" });
-        assert_eq!(converted(schema.clone(), json!(1904187905555555i64)).value, json!("2030-05-05 05:05:05.555555"));
-        assert_eq!(converted(schema.clone(), json!(0)).value, json!("1970-01-01 00:00:00"));
-        assert_eq!(converted(schema.clone(), json!(-876544i64)).value, json!("1969-12-31 23:59:59.123456"));
-        assert_eq!(converted(schema.clone(), json!(9223372036825200000i64)).value, json!("infinity"));
-        assert_eq!(converted(schema, json!(-9223372036832400000i64)).value, json!("-infinity"));
+        assert_eq!(
+            converted(schema.clone(), json!(1904187905555555i64)).value,
+            json!("2030-05-05 05:05:05.555555")
+        );
+        assert_eq!(
+            converted(schema.clone(), json!(0)).value,
+            json!("1970-01-01 00:00:00")
+        );
+        assert_eq!(
+            converted(schema.clone(), json!(-876544i64)).value,
+            json!("1969-12-31 23:59:59.123456")
+        );
+        assert_eq!(
+            converted(schema.clone(), json!(9223372036825200000i64)).value,
+            json!("infinity")
+        );
+        assert_eq!(
+            converted(schema, json!(-9223372036832400000i64)).value,
+            json!("-infinity")
+        );
     }
 
     #[test]
     fn date_handles_infinity_and_range() {
         let schema = json!({ "type": "int32", "optional": true, "field": "v", "name": "io.debezium.time.Date" });
-        assert_eq!(converted(schema.clone(), json!(19782)).value, json!("2024-02-29"));
-        assert_eq!(converted(schema.clone(), json!(-719162)).value, json!("0001-01-01"));
-        assert_eq!(converted(schema.clone(), json!(-2147472692i64)).value, json!("infinity"));
-        assert_eq!(converted(schema.clone(), json!(-2147472691i64)).value, json!("-infinity"));
-        assert_eq!(converted(schema.clone(), json!(-622191234)).value, json!("infinity"));
-        assert_eq!(converted(schema.clone(), json!(-625821272)).value, json!("-infinity"));
+        assert_eq!(
+            converted(schema.clone(), json!(19782)).value,
+            json!("2024-02-29")
+        );
+        assert_eq!(
+            converted(schema.clone(), json!(-719162)).value,
+            json!("0001-01-01")
+        );
+        assert_eq!(
+            converted(schema.clone(), json!(-2147472692i64)).value,
+            json!("infinity")
+        );
+        assert_eq!(
+            converted(schema.clone(), json!(-2147472691i64)).value,
+            json!("-infinity")
+        );
+        assert_eq!(
+            converted(schema.clone(), json!(-622191234)).value,
+            json!("infinity")
+        );
+        assert_eq!(
+            converted(schema.clone(), json!(-625821272)).value,
+            json!("-infinity")
+        );
         assert_eq!(converted(schema, json!(i64::MAX)).value, Value::Null);
     }
 
@@ -534,33 +588,53 @@ mod tests {
     fn time_types_are_converted() {
         let micro = json!({ "type": "int64", "optional": true, "field": "v", "name": "io.debezium.time.MicroTime" });
         let v = converted(micro, json!(49530500000i64));
-        assert_eq!((v.data_type.as_str(), v.value), ("TIME", json!("13:45:30.500000")));
+        assert_eq!(
+            (v.data_type.as_str(), v.value),
+            ("TIME", json!("13:45:30.500000"))
+        );
         let milli = json!({ "type": "int32", "optional": true, "field": "v", "name": "io.debezium.time.Time" });
-        assert_eq!(converted(milli, json!(1000)).value, json!("00:00:01.000000"));
+        assert_eq!(
+            converted(milli, json!(1000)).value,
+            json!("00:00:01.000000")
+        );
         let zoned = json!({ "type": "string", "optional": true, "field": "v", "name": "io.debezium.time.ZonedTime" });
-        assert_eq!(converted(zoned, json!("06:45:30Z")).data_type, "TIME WITH TIME ZONE");
+        assert_eq!(
+            converted(zoned, json!("06:45:30Z")).data_type,
+            "TIME WITH TIME ZONE"
+        );
         let duration = json!({ "type": "int64", "optional": true, "field": "v", "name": "io.debezium.time.MicroDuration" });
         let v = converted(duration, json!(93784000000i64));
-        assert_eq!((v.data_type.as_str(), v.value), ("INTERVAL", json!("93784000000 microseconds")));
+        assert_eq!(
+            (v.data_type.as_str(), v.value),
+            ("INTERVAL", json!("93784000000 microseconds"))
+        );
     }
 
     #[test]
     fn arrays_keep_elements() {
         let schema = json!({ "type": "array", "optional": true, "field": "v", "items": { "type": "int32", "optional": true } });
         let v = converted(schema, json!([1, null, 3]));
-        assert_eq!((v.data_type.as_str(), v.simple_type.as_str()), ("INTEGER[]", "ARRAY"));
+        assert_eq!(
+            (v.data_type.as_str(), v.simple_type.as_str()),
+            ("INTEGER[]", "ARRAY")
+        );
         assert_eq!(v.value, json!([1, null, 3]));
         let schema = json!({ "type": "array", "optional": true, "field": "v", "items": {
             "type": "bytes", "optional": true, "name": "org.apache.kafka.connect.data.Decimal", "parameters": { "scale": "2" } } });
         let v = converted(schema, json!(["AeI="]));
-        assert_eq!((v.data_type.as_str(), v.value), ("NUMERIC[]", json!(["4.82"])));
+        assert_eq!(
+            (v.data_type.as_str(), v.value),
+            ("NUMERIC[]", json!(["4.82"]))
+        );
     }
 
     // Kiểu chưa biết: giữ giá trị (trước đây thành NULL)
     #[test]
     fn unknown_type_keeps_value_as_text() {
-        let v = converted(json!({ "type": "struct", "optional": true, "field": "v", "name": "io.debezium.data.geometry.Point" }),
-                          json!({ "x": 1.0, "y": 2.0 }));
+        let v = converted(
+            json!({ "type": "struct", "optional": true, "field": "v", "name": "io.debezium.data.geometry.Point" }),
+            json!({ "x": 1.0, "y": 2.0 }),
+        );
         assert_eq!(v.data_type, "TEXT");
         assert_eq!(v.value, json!({ "x": 1.0, "y": 2.0 }));
     }
