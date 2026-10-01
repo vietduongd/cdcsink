@@ -6,7 +6,7 @@ use sqlx::{PgPool, Row, postgres::PgPoolOptions};
 use tracing::{error, warn};
 
 use crate::models::{
-    DataModel, NatMessageReceive, RowAction, decimal::decimal_text, sync_config::primary_key_column,
+    ChangeRow, DataModel, WriteError, decimal::decimal_text, sync_config::primary_key_column,
 };
 
 /// Table metadata cdcsink tự tạo ở DB đích.
@@ -157,7 +157,7 @@ impl PostgresDestination {
         table_name: &String,
         columns: &HashMap<String, DataModel>,
         pool: &PgPool,
-    ) {
+    ) -> Result<(), String> {
         let primary_key = primary_key_column(columns);
         let mut columns_definitions = Vec::new();
         for (col_name, col_type) in columns {
@@ -182,10 +182,12 @@ impl PostgresDestination {
             Self::quote_identifier(table_name),
             columns_sql
         );
-        sqlx::query(&query_info)
-            .execute(pool)
-            .await
-            .expect("Failed to create table");
+        sqlx::query(&query_info).execute(pool).await.map_err(|e| {
+            format!(
+                "Failed to create table {}.{}: {}",
+                schema_name, table_name, e
+            )
+        })?;
 
         let insert_query = format!(
             r#"INSERT INTO {}.{} (schema_name, table_name, column_name, data_type, nullable)
@@ -196,8 +198,9 @@ impl PostgresDestination {
             Self::quote_identifier(SCHEMA_METADATA_TABLE)
         );
 
+        // Metadata chỉ dùng để đối chiếu lúc khởi động: lỗi ghi metadata không chặn sync
         for (col_name, col_type) in columns {
-            sqlx::query(&insert_query)
+            if let Err(e) = sqlx::query(&insert_query)
                 .bind(&self.schema_expect)
                 .bind(table_name)
                 .bind(col_name)
@@ -205,8 +208,17 @@ impl PostgresDestination {
                 .bind(col_type.nullable)
                 .execute(pool)
                 .await
-                .expect("Failed to upsert schema metadata");
+            {
+                warn!(
+                    schema = %schema_name,
+                    table = %table_name,
+                    column = %col_name,
+                    error = %e,
+                    "Failed to upsert schema metadata"
+                );
+            }
         }
+        Ok(())
     }
 
     pub async fn add_column_if_not_exists(
@@ -216,7 +228,7 @@ impl PostgresDestination {
         col_name: &str,
         col_type: &DataModel,
         pool: &PgPool,
-    ) {
+    ) -> Result<(), String> {
         let alter_query = format!(
             "ALTER TABLE {}.{} ADD COLUMN IF NOT EXISTS {} {}",
             Self::quote_identifier(schema_name),
@@ -224,15 +236,12 @@ impl PostgresDestination {
             Self::quote_identifier(col_name),
             col_type.data_type,
         );
-        if let Err(e) = sqlx::query(&alter_query).execute(pool).await {
-            error!(
-                schema = %schema_name,
-                table = %table_name,
-                column = %col_name,
-                error = %e,
-                "Failed to add column"
-            );
-        }
+        sqlx::query(&alter_query).execute(pool).await.map_err(|e| {
+            format!(
+                "Failed to add column {}.{}.{}: {}",
+                schema_name, table_name, col_name, e
+            )
+        })?;
 
         // Cập nhật metadata
         let insert_query = format!(
@@ -252,7 +261,7 @@ impl PostgresDestination {
             .execute(pool)
             .await
         {
-            error!(
+            warn!(
                 schema = %schema_name,
                 table = %table_name,
                 column = %col_name,
@@ -260,69 +269,36 @@ impl PostgresDestination {
                 "Failed to upsert schema metadata"
             );
         }
+        Ok(())
     }
 
-    fn remove_duplicate_data<'a>(
-        records: &'a Vec<&'a NatMessageReceive>,
-    ) -> Vec<&'a NatMessageReceive> {
-        let mut seen_ids: HashMap<String, &NatMessageReceive> =
-            HashMap::<String, &'a NatMessageReceive>::new();
-
-        for record in records {
-            let primary_key = match &record.primary_key {
-                Some(pk) => pk,
-                None => continue, // Skip records without primary key
-            };
-            if !seen_ids.contains_key(&primary_key.clone()) {
-                seen_ids.insert(primary_key.clone(), record);
-            } else {
-                let existing_record = seen_ids.get(&primary_key.clone()).unwrap();
-                if record.index > existing_record.index {
-                    seen_ids
-                        .entry(primary_key.clone())
-                        .and_modify(|e| *e = record);
-                }
-            }
-        }
-
-        seen_ids.values().cloned().collect()
-    }
-
-    pub async fn insert_value(
-        &self,
-        table_name: &String,
-        columns_raw: &Vec<&NatMessageReceive>,
-        pool: &PgPool,
-    ) {
-        let columns = Self::remove_duplicate_data(columns_raw);
-        if columns.is_empty() {
-            return;
-        }
-
-        // Tách message delete và upsert
-        let (to_delete, to_upsert): (Vec<&NatMessageReceive>, Vec<&NatMessageReceive>) = columns
-            .into_iter()
-            .partition(|msg| msg.action == RowAction::Delete);
-
-        let table = format!(
+    fn qualified_table(&self, table_name: &str) -> String {
+        format!(
             "{}.{}",
             Self::quote_identifier(&self.schema_expect),
             Self::quote_identifier(table_name)
-        );
+        )
+    }
 
-        if !to_delete.is_empty() {
-            Self::delete_rows(&table, table_name, &to_delete, pool).await;
+    /// Upsert các dòng của một table bằng một câu lệnh. Mỗi khóa chính chỉ được có một dòng
+    /// (xem `latest_per_key`); dòng thiếu cột nào thì cột đó nhận NULL.
+    pub async fn upsert_rows(
+        &self,
+        table_name: &str,
+        rows: Vec<&ChangeRow>,
+        pool: &PgPool,
+    ) -> Result<(), WriteError> {
+        if rows.is_empty() {
+            return Ok(());
         }
-        if to_upsert.is_empty() {
-            return;
-        }
-
-        let column_active = &to_upsert[0].table_value;
+        let column_active = &rows[0].table_value;
         let primary_key = match primary_key_column(column_active) {
             Some(pk) => pk.clone(),
             None => {
-                error!(table = %table_name, "Missing id column for upsert");
-                return;
+                return Err(WriteError::Transient(format!(
+                    "Missing id column for upsert into table {}",
+                    table_name
+                )));
             }
         };
         let mut colum_keys = column_active.keys().cloned().collect::<Vec<String>>();
@@ -364,7 +340,7 @@ impl PostgresDestination {
         };
         let s = format!(
             "INSERT INTO {} ({}) SELECT {} FROM unnest({}) AS u({}) ON CONFLICT ({}) {}",
-            table,
+            self.qualified_table(table_name),
             column_list,
             select_list,
             params,
@@ -376,42 +352,55 @@ impl PostgresDestination {
         let mut query = sqlx::query(&s);
         for column in &colum_keys {
             // Record thiếu cột này thì dùng NULL
-            let values: Vec<Option<String>> = to_upsert
+            let values: Vec<Option<String>> = rows
                 .iter()
-                .map(|col_info| col_info.table_value.get(column).and_then(Self::to_pg_text))
+                .map(|row| row.table_value.get(column).and_then(Self::to_pg_text))
                 .collect();
             query = query.bind(values);
         }
-        query.execute(pool).await.expect("Failed to insert values");
+        query.execute(pool).await.map_err(|e| {
+            WriteError::from(e).context(&format!("Failed to upsert into table {}", table_name))
+        })?;
+        Ok(())
     }
 
-    async fn delete_rows(
-        table: &str,
+    pub async fn delete_rows(
+        &self,
         table_name: &str,
-        to_delete: &[&NatMessageReceive],
+        rows: Vec<&ChangeRow>,
         pool: &PgPool,
-    ) {
-        let primary_key = match primary_key_column(&to_delete[0].table_value) {
+    ) -> Result<(), WriteError> {
+        if rows.is_empty() {
+            return Ok(());
+        }
+        let primary_key = match primary_key_column(&rows[0].table_value) {
             Some(pk) => pk.clone(),
             None => {
-                error!(table = %table_name, "Missing id column for delete");
-                return;
+                return Err(WriteError::Transient(format!(
+                    "Missing id column for delete in table {}",
+                    table_name
+                )));
             }
         };
-        let key_type = &to_delete[0].table_value[&primary_key].data_type;
+        let key_type = &rows[0].table_value[&primary_key].data_type;
         let delete_query_str = format!(
             "DELETE FROM {} WHERE {} = ANY($1::TEXT[]::{}[]);",
-            table,
+            self.qualified_table(table_name),
             Self::quote_identifier(&primary_key),
             key_type
         );
-        let ids: Vec<Option<String>> = to_delete
+        let ids: Vec<Option<String>> = rows
             .iter()
-            .map(|m| m.table_value.get(&primary_key).and_then(Self::to_pg_text))
+            .map(|row| row.table_value.get(&primary_key).and_then(Self::to_pg_text))
             .collect();
-        if let Err(e) = sqlx::query(&delete_query_str).bind(ids).execute(pool).await {
-            error!(table = %table_name, error = %e, "Failed to execute delete");
-        }
+        sqlx::query(&delete_query_str)
+            .bind(ids)
+            .execute(pool)
+            .await
+            .map_err(|e| {
+                WriteError::from(e).context(&format!("Failed to delete from table {}", table_name))
+            })?;
+        Ok(())
     }
 
     /// Dạng text Postgres đọc được của một ô, sẽ được cast sang kiểu cột khi insert. NULL -> None.
@@ -465,7 +454,7 @@ impl PostgresDestination {
 
     /// Luôn đặt trong dấu nháy kép: giữ hoa thường, cho phép từ khóa SQL, khoảng trắng, gạch ngang...
     /// Tên viết thường khi quote vẫn trùng tên cũ nên không ảnh hưởng table đã tạo trước đây.
-    fn quote_identifier(identifier: &str) -> String {
+    pub(crate) fn quote_identifier(identifier: &str) -> String {
         format!("\"{}\"", identifier.replace('"', "\"\""))
     }
 }

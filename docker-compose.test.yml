@@ -111,6 +111,7 @@ services:
       DATABASE_URL: postgres://postgres:postgres@pg-sink:5432/receive_sync
       DATABASE_SCHEMA_EXPECT: public
       SYNC_CONFIG_PATH: /app/sync_config.yaml
+      DEAD_LETTER_REPLAY_SECS: "2"
     volumes:
       - ./test/e2e/sync_config.yaml:/app/sync_config.yaml:ro
     restart: on-failure

@@ -1,12 +1,20 @@
+mod change;
 mod data_record;
+mod dead_letter;
 mod decimal;
+mod isolate;
 mod models_info;
 mod nats_receive;
 mod postgres_destination;
 mod sync_config;
+mod write_error;
 
+pub use change::{ChangeRow, Parsed, PoisonMessage, RowSource, latest_per_key, parse_change};
 pub use data_record::DataRecord;
+pub use dead_letter::{DeadLetterStore, NewDeadLetter};
+pub use isolate::{Rejected, write_isolating};
 pub use models_info::DataModel;
-pub use nats_receive::{NatMessageReceive, NatsReceive};
+pub use nats_receive::NatsReceive;
 pub use postgres_destination::PostgresDestination;
 pub use sync_config::{RowAction, SyncConfig};
+pub use write_error::WriteError;

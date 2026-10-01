@@ -8,14 +8,19 @@ RUN apt-get update && \
     apt-get install -y pkg-config libssl-dev && \
     rm -rf /var/lib/apt/lists/*
 
-# Copy manifests
-COPY Cargo.toml ./
+# Copy manifests; --locked giữ đúng phiên bản dependency trong Cargo.lock
+COPY Cargo.toml Cargo.lock ./
+
+# Build dependency trước với main rỗng: layer này được cache, sửa code không phải build lại dependency
+RUN mkdir src && echo 'fn main() {}' > src/main.rs && \
+    cargo build --release --locked && \
+    rm -rf src
 
 # Copy actual source code
 COPY src ./src
 
-# Build the application
-RUN cargo build --release
+# Build the application (touch để cargo không dùng lại binary của main rỗng)
+RUN touch src/main.rs && cargo build --release --locked
 
 # Runtime stage
 FROM debian:bookworm-slim

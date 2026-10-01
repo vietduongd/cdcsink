@@ -5,17 +5,16 @@ use std::{
 
 use async_nats::{
     connect,
-    jetstream::{self, Message},
+    jetstream::{self, AckKind, Message},
 };
 
-use async_nats::jetstream::consumer::PullConsumer;
+use async_nats::jetstream::consumer::{FromConsumer, PullConsumer, pull};
 use futures_util::StreamExt;
-use tracing::warn;
+use tracing::{debug, info, warn};
 
 use crate::models::{
-    DataModel, DataRecord, RowAction, SyncConfig,
-    postgres_destination::SCHEMA_METADATA_TABLE,
-    sync_config::{MatchOutcome, classify, primary_key_column},
+    ChangeRow, Parsed, PoisonMessage, RowSource, SyncConfig, change::SkipReason, parse_change,
+    sync_config::MatchOutcome,
 };
 
 pub struct NatsReceive {
@@ -24,27 +23,18 @@ pub struct NatsReceive {
     pub topic_name: String,
     pub stream: String,
     pub number_pull_object: usize,
+    /// Thời gian NATS chờ ack trước khi gửi lại message
+    pub ack_wait: Duration,
 }
 
-pub struct NatMessageReceive {
-    pub index: i64,
-    pub message: Message,
-    pub table_name: String,
-    pub table_value: HashMap<String, DataModel>,
-    pub primary_key: Option<String>,
-    pub action: RowAction,
-}
-
-/// Bỏ hậu tố `_resync` để message resync dùng chung table và config với table gốc.
-pub fn normalize_table_name(name: &str) -> String {
-    name.strip_suffix("_resync").unwrap_or(name).to_string()
-}
-
-/// Table không bao giờ sync. `_cdc_schema_metadata` là metadata cdcsink tự tạo ở DB đích:
-/// khi DB đích lại là nguồn của một tầng CDC khác (cdcsink nối tiếp cdcsink),
-/// sync table này sẽ ghi đè metadata của tầng sau.
-pub fn is_ignored_table(name: &str) -> bool {
-    name.eq_ignore_ascii_case(SCHEMA_METADATA_TABLE)
+/// Kết quả một lần fetch.
+pub struct ReceivedBatch {
+    /// Dòng hợp lệ, theo thứ tự nhận.
+    pub rows: Vec<ChangeRow>,
+    /// Message không parse được, được ghi vào dead-letter trước khi ack.
+    pub poison: Vec<PoisonMessage>,
+    /// Message của `rows` và `poison`, chỉ ack sau khi batch được lưu xong.
+    pub messages: Vec<Message>,
 }
 
 impl NatsReceive {
@@ -54,6 +44,7 @@ impl NatsReceive {
         topic_name: String,
         stream: String,
         number_pull_object: usize,
+        ack_wait: Duration,
     ) -> Self {
         NatsReceive {
             url,
@@ -61,6 +52,7 @@ impl NatsReceive {
             topic_name,
             stream,
             number_pull_object,
+            ack_wait,
         }
     }
 
@@ -81,15 +73,32 @@ impl NatsReceive {
         let consumer: PullConsumer = stream_info
             .get_or_create_consumer(
                 &self.durable_name.clone(),
-                async_nats::jetstream::consumer::pull::Config {
+                pull::Config {
                     durable_name: Some(self.durable_name.clone()),
                     filter_subject: self.topic_name.clone(),
-                    ack_wait: std::time::Duration::from_secs(10),
+                    ack_wait: self.ack_wait,
                     ..Default::default()
                 },
             )
             .await
             .map_err(|e| format!("Failed to get or create consumer: {}", e))?;
+        if consumer.cached_info().config.ack_wait == self.ack_wait {
+            return Ok(consumer);
+        }
+        // Consumer đã có từ trước với ack_wait khác: get_or_create không đổi config nên phải update
+        let mut config = consumer.cached_info().config.clone();
+        config.ack_wait = self.ack_wait;
+        let config = pull::Config::try_from_consumer_config(config)
+            .map_err(|e| format!("Failed to build consumer config: {}", e))?;
+        let consumer = stream_info
+            .update_consumer(config)
+            .await
+            .map_err(|e| format!("Failed to update consumer ack_wait: {}", e))?;
+        info!(
+            consumer = %self.durable_name,
+            ack_wait_secs = self.ack_wait.as_secs(),
+            "Consumer ack_wait updated"
+        );
         Ok(consumer)
     }
 
@@ -98,8 +107,8 @@ impl NatsReceive {
         consumer: &mut PullConsumer,
         sync_config: Option<&SyncConfig>,
         logged_type_errors: &mut HashSet<String>,
-    ) -> Result<Vec<NatMessageReceive>, String> {
-        let mut messages = consumer
+    ) -> Result<ReceivedBatch, String> {
+        let mut stream = consumer
             .fetch()
             .max_messages(self.number_pull_object)
             .expires(Duration::from_secs(5)) // 👈 MaxWait
@@ -107,95 +116,50 @@ impl NatsReceive {
             .await
             .map_err(|e| format!("Failed to receive messages: {}", e))?;
 
-        let mut received_messages: Vec<NatMessageReceive> = Vec::new();
+        let mut batch = ReceivedBatch {
+            rows: Vec::new(),
+            poison: Vec::new(),
+            messages: Vec::new(),
+        };
         // table -> (tổng số message, số message bị loại vì lỗi kiểu hoặc thiếu cột)
         let mut type_rejections: HashMap<String, (usize, usize)> = HashMap::new();
         let mut counter = 0;
-        while let Some(Ok(message)) = messages.next().await {
-            let data_record: DataRecord = serde_json::from_slice(&message.payload)
-                .map_err(|e| format!("Failed to deserialize message payload: {}", e))?;
-
-            let table_name = normalize_table_name(
-                &data_record
-                    .get_table_name()
-                    .ok_or("Failed to get table name from data record")?,
-            );
-            if is_ignored_table(&table_name) {
-                let key = format!("{}|ignored", table_name);
-                if logged_type_errors.insert(key) {
-                    warn!(table = %table_name, "Table is never synced, messages are skipped");
+        while let Some(item) = stream.next().await {
+            let message = match item {
+                Ok(message) => message,
+                Err(e) => {
+                    // Phần còn lại của batch chưa nhận sẽ được NATS gửi lại ở lần fetch sau
+                    warn!(error = %e, "Failed to read message from batch");
+                    break;
                 }
-                Self::ack_skipped(&message).await?;
-                continue;
-            }
-
-            let mut table_value = data_record
-                .get_table_structure()
-                .ok_or("Failed to get table structure from data record")?;
-
-            let primary_key = match primary_key_column(&table_value) {
-                Some(column) => Some(table_value[column].value.to_string()),
-                None => {
-                    let key = format!("{}|no-primary-key", table_name);
-                    if logged_type_errors.insert(key) {
-                        warn!(table = %table_name, "Table has no \"id\" column, messages are skipped");
+            };
+            let stream_sequence = message.info().ok().map(|info| info.stream_sequence);
+            let source = RowSource::new(&message.subject, stream_sequence, &message.payload);
+            match parse_change(source, counter, sync_config) {
+                Parsed::Row { row, outcome } => {
+                    log_filter_problems(&row.table_name, &outcome, logged_type_errors);
+                    let stats = type_rejections
+                        .entry(row.table_name.clone())
+                        .or_insert((0, 0));
+                    stats.0 += 1;
+                    if !outcome.matched
+                        && (!outcome.type_errors.is_empty() || !outcome.missing_columns.is_empty())
+                    {
+                        stats.1 += 1;
                     }
+                    batch.rows.push(row);
+                    batch.messages.push(message);
+                    counter += 1;
+                }
+                Parsed::Poison(poison) => {
+                    batch.poison.push(poison);
+                    batch.messages.push(message);
+                }
+                Parsed::Skip(reason) => {
+                    log_skip(&reason, logged_type_errors);
                     Self::ack_skipped(&message).await?;
-                    continue;
-                }
-            };
-
-            let table_config = sync_config.and_then(|config| config.table(&table_name));
-            // Debezium xóa dòng bằng op "d"; "before" có thể chỉ chứa khóa chính nên không xét where
-            let (action, outcome) = if data_record.payload.op == "d" {
-                (RowAction::Delete, MatchOutcome::default())
-            } else {
-                classify(&table_value, table_config)
-            };
-
-            for error in &outcome.type_errors {
-                let key = format!("{}|{}|{:?}", table_name, error.column, error.op);
-                if logged_type_errors.insert(key) {
-                    warn!(
-                        table = %table_name,
-                        column = %error.column,
-                        op = ?error.op,
-                        detail = %error.detail,
-                        "Sync filter type mismatch"
-                    );
                 }
             }
-            for column in &outcome.missing_columns {
-                let key = format!("{}|{}|missing", table_name, column);
-                if logged_type_errors.insert(key) {
-                    warn!(
-                        table = %table_name,
-                        column = %column,
-                        "Sync filter column not found (check the name in where; rows are deleted)"
-                    );
-                }
-            }
-            let stats = type_rejections.entry(table_name.clone()).or_insert((0, 0));
-            stats.0 += 1;
-            if !outcome.matched
-                && (!outcome.type_errors.is_empty() || !outcome.missing_columns.is_empty())
-            {
-                stats.1 += 1;
-            }
-
-            if let Some(config) = table_config {
-                config.retain_columns(&mut table_value);
-            }
-
-            received_messages.push(NatMessageReceive {
-                message,
-                table_name,
-                table_value,
-                index: counter,
-                primary_key,
-                action,
-            });
-            counter += 1;
         }
 
         for (table_name, (total, rejected)) in &type_rejections {
@@ -208,7 +172,22 @@ impl NatsReceive {
             }
         }
 
-        Ok(received_messages)
+        Ok(batch)
+    }
+
+    /// Chu kỳ gửi Progress: 3 lần trong mỗi ack_wait để một lần gửi chậm/lỗi chưa làm NATS gửi lại.
+    pub fn progress_interval(&self) -> Duration {
+        Duration::from_millis((self.ack_wait.as_millis() / 3) as u64)
+    }
+
+    /// Gia hạn ack_wait cho cả batch (đang ghi hoặc đang chờ retry), để NATS không gửi lại giữa chừng.
+    pub async fn extend_ack_deadline(&self, messages: &[Message]) {
+        for message in messages {
+            if let Err(e) = message.ack_with(AckKind::Progress).await {
+                warn!(error = %e, "Failed to extend ack deadline");
+                return;
+            }
+        }
     }
 
     /// Message bị bỏ qua vẫn phải ack, nếu không NATS gửi lại sau mỗi ack_wait mãi mãi.
@@ -219,10 +198,9 @@ impl NatsReceive {
             .map_err(|e| format!("Failed to acknowledge skipped message: {}", e))
     }
 
-    pub async fn ack_message(&self, nats_message: &Vec<NatMessageReceive>) -> Result<(), String> {
-        for message in nats_message {
+    pub async fn ack_messages(&self, messages: &[Message]) -> Result<(), String> {
+        for message in messages {
             message
-                .message
                 .ack()
                 .await
                 .map_err(|e| format!("Failed to acknowledge message: {}", e))?;
@@ -231,28 +209,71 @@ impl NatsReceive {
     }
 }
 
+/// Log một lần cho mỗi (table, lý do) để không lặp log mỗi batch.
+fn log_skip(reason: &SkipReason, logged: &mut HashSet<String>) {
+    match reason {
+        SkipReason::Tombstone => debug!("Skipping tombstone message"),
+        SkipReason::IgnoredTable(table) => {
+            if logged.insert(format!("{}|ignored", table)) {
+                warn!(table = %table, "Table is never synced, messages are skipped");
+            }
+        }
+        SkipReason::NoPrimaryKey(table) => {
+            if logged.insert(format!("{}|no-primary-key", table)) {
+                warn!(table = %table, "Table has no \"id\" column, messages are skipped");
+            }
+        }
+    }
+}
+
+fn log_filter_problems(table_name: &str, outcome: &MatchOutcome, logged: &mut HashSet<String>) {
+    for error in &outcome.type_errors {
+        let key = format!("{}|{}|{:?}", table_name, error.column, error.op);
+        if logged.insert(key) {
+            warn!(
+                table = %table_name,
+                column = %error.column,
+                op = ?error.op,
+                detail = %error.detail,
+                "Sync filter type mismatch"
+            );
+        }
+    }
+    for column in &outcome.missing_columns {
+        let key = format!("{}|{}|missing", table_name, column);
+        if logged.insert(key) {
+            warn!(
+                table = %table_name,
+                column = %column,
+                "Sync filter column not found (check the name in where; rows are deleted)"
+            );
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    // Review Focus #5: table _resync dùng chung config/tên với table gốc
-    #[test]
-    fn strips_resync_suffix() {
-        assert_eq!(normalize_table_name("orders_resync"), "orders");
-        assert_eq!(normalize_table_name("OrderItems_resync"), "OrderItems");
-        assert_eq!(normalize_table_name("orders"), "orders");
-        assert_eq!(normalize_table_name("resync_log"), "resync_log");
+    fn receiver(ack_wait_secs: u64) -> NatsReceive {
+        NatsReceive::new(
+            "nats://x".to_string(),
+            "c".to_string(),
+            "t".to_string(),
+            "s".to_string(),
+            10,
+            Duration::from_secs(ack_wait_secs),
+        )
     }
 
+    // Gia hạn 3 lần trong mỗi ack_wait để một lần gửi Progress chậm/lỗi không làm NATS gửi lại batch
     #[test]
-    fn ignores_schema_metadata_table() {
-        assert!(is_ignored_table("_cdc_schema_metadata"));
-        assert!(is_ignored_table("_CDC_Schema_Metadata"));
-        // bản _resync được chuẩn hóa trước khi kiểm tra
-        assert!(is_ignored_table(&normalize_table_name(
-            "_cdc_schema_metadata_resync"
-        )));
-        assert!(!is_ignored_table("cdc_schema_metadata"));
-        assert!(!is_ignored_table("orders"));
+    fn progress_interval_is_a_third_of_ack_wait() {
+        assert_eq!(receiver(30).progress_interval(), Duration::from_secs(10));
+        assert_eq!(
+            receiver(10).progress_interval(),
+            Duration::from_millis(3333)
+        );
+        assert!(receiver(1).progress_interval() < Duration::from_secs(1));
     }
 }

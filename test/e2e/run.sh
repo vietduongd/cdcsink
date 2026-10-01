@@ -10,6 +10,7 @@
 #   changes.sql : thay đổi sau snapshot (đi qua streaming, op = c/u/d) — tùy chọn
 #   verify.sql  : các lệnh SELECT e2e_check(...) chạy trên DB đích
 #   sink-before-changes.sql : (tùy chọn) chạy trên DB đích sau snapshot, rồi restart cdcsink
+#   after-changes.sh : (tùy chọn) bash chạy sau khi changes tới đích, vd thao tác dead-letter rồi chờ replay
 #
 # Biến môi trường: WAIT_TIMEOUT (giây, mặc định 120), KEEP=1.
 
@@ -89,6 +90,13 @@ run_suite() {
         fi
         src_psql -c "insert into e2e_marker(id) values ('changes')"
         wait_marker changes || stalled=1
+    fi
+
+    # Tùy chọn: kịch bản riêng của suite sau khi changes đã tới đích. Chạy bằng source nên dùng được
+    # src_psql, sink_psql, wait_marker, $DC, WAIT_TIMEOUT và đặt stalled=1 khi thấy sai.
+    if [[ $stalled == 0 && -f "$dir/after-changes.sh" ]]; then
+        echo " - chạy after-changes.sh..."
+        source "$dir/after-changes.sh"
     fi
 
     # Marker có thể đã được ghi trước khi cdcsink panic ở một message khác cùng batch -> kiểm tra panic riêng
